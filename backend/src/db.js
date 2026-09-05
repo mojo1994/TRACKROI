@@ -840,6 +840,102 @@ function sourceClause(source) {
   return { sql: " AND source = ?", params: [String(source).toLowerCase()] };
 }
 
+function dailyTrend(source = "all", period = null) {
+  const salesWhere = sourceClause(source);
+  const clicksWhere = sourceClause(source);
+  const spendWhere = sourceClause(source);
+  const pd = period && period.sql ? { sql: period.sql, params: period.params } : { sql: "", params: [] };
+
+  const spendRows = all(
+    `SELECT substr(created_at, 1, 10) AS day, COALESCE(SUM(amount_cents), 0) AS amount
+     FROM advertising_spend WHERE 1=1${spendWhere.sql}${pd.sql}
+     GROUP BY day`,
+    [...spendWhere.params, ...pd.params]
+  );
+
+  const clickRows = all(
+    `SELECT substr(created_at, 1, 10) AS day, COALESCE(SUM(quantity), 0) AS count
+     FROM clicks WHERE 1=1${clicksWhere.sql}${pd.sql}
+     GROUP BY day`,
+    [...clicksWhere.params, ...pd.params]
+  );
+
+  const saleRows = all(
+    `SELECT substr(created_at, 1, 10) AS day,
+            COALESCE(SUM(CASE WHEN status = 'approved' THEN quantity ELSE 0 END), 0) AS approved,
+            COALESCE(SUM(CASE WHEN status = 'approved' THEN amount_cents ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN status IN ('refunded','chargeback') THEN amount_cents ELSE 0 END), 0) AS refunds
+     FROM sales WHERE 1=1${salesWhere.sql}${pd.sql}
+     GROUP BY day`,
+    [...salesWhere.params, ...pd.params]
+  );
+
+  const byDay = new Map();
+  const init = (day) => {
+    if (!byDay.has(day)) {
+      byDay.set(day, { date: day, spendCents: 0, clicks: 0, revenueCents: 0, refundCents: 0, profitCents: 0 });
+    }
+    return byDay.get(day);
+  };
+
+  for (const row of spendRows) init(row.day).spendCents = Number(row.amount) || 0;
+  for (const row of clickRows) init(row.day).clicks = Number(row.count) || 0;
+  for (const row of saleRows) {
+    const entry = init(row.day);
+    entry.revenueCents = Number(row.revenue) || 0;
+    entry.refundCents = Number(row.refunds) || 0;
+  }
+
+  const days = [];
+  for (const entry of byDay.values()) {
+    entry.profitCents = entry.revenueCents - entry.refundCents - entry.spendCents;
+    days.push(entry);
+  }
+  days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const withEmptyBuckets = ensureEmptyDays(days, period);
+  const totals = withEmptyBuckets.reduce(
+    (acc, d) => {
+      acc.spendCents += d.spendCents;
+      acc.clicks += d.clicks;
+      acc.revenueCents += d.revenueCents;
+      acc.refundCents += d.refundCents;
+      return acc;
+    },
+    { spendCents: 0, clicks: 0, revenueCents: 0, refundCents: 0 }
+  );
+  totals.empty = withEmptyBuckets.length === 0 || withEmptyBuckets.every((d) => d.spendCents === 0 && d.clicks === 0 && d.revenueCents === 0);
+
+  return { points: withEmptyBuckets, totals };
+}
+
+function ensureEmptyDays(days, period) {
+  if (!period || !period.from || !period.to) return days;
+  const from = new Date(period.from);
+  const to = new Date(period.to);
+  const DAY = 86400000;
+  const maxPoints = 92;
+  const totalDays = Math.min(
+    maxPoints,
+    Math.max(1, Math.round((to.getTime() - from.getTime()) / DAY))
+  );
+  const map = new Map(days.map((d) => [d.date, d]));
+  const result = [];
+  const toIso = (date) => date.toISOString().slice(0, 10);
+  const startDay = new Date(from.getTime() + 12 * 60 * 60 * 1000);
+  for (let i = 0; i < totalDays; i++) {
+    const date = new Date(startDay.getTime() + i * DAY);
+    const key = toIso(date);
+    const existing = map.get(key);
+    if (existing) {
+      result.push(existing);
+    } else {
+      result.push({ date: key, spendCents: 0, clicks: 0, revenueCents: 0, refundCents: 0, profitCents: 0 });
+    }
+  }
+  return result;
+}
+
 function dashboardAggregates(source, period = null) {
   const salesWhere = sourceClause(source);
   const clicksWhere = sourceClause(source);
@@ -934,6 +1030,7 @@ module.exports = {
   isRateLimited,
   pruneLoginAttempts,
   dashboardAggregates,
+  dailyTrend,
   migrateStateJson,
   seedAdminIfNeeded,
   dbPath: DB_FILE,

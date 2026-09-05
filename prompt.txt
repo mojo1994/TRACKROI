@@ -1,66 +1,119 @@
-<technical_audit_and_upgrade_brief project="TrackROI" target_agent="opencode">
+<layout_fix_brief project="TrackROI" screen="metrics_page" target_agent="opencode">
 
-  <context>
-    <current_stack>Node.js puro (sem framework), servidor HTTP nativo no backend, arquivo state.json como armazenamento único, frontend vanilla JS com renderização via innerHTML, deploy no Railway via start.js orquestrando dois processos filhos (backend + frontend) atrás de um proxy manual.</current_stack>
-    <confirmed_bug>Clicking "Conectar" for Meta Ads or Perfect Pay opens a new browser tab pointing directly at the backend OAuth-start endpoint. When META_APP_ID/META_APP_SECRET are missing, the backend returns raw JSON in that new tab instead of a handled error inside the app. This is a structural flaw in the connection flow, not just a missing env var.</confirmed_bug>
-    <business_requirement>TrackROI must feel and behave like a real, professional production SaaS — not a prototype. No fake/placeholder data, no broken flows, no silent failures visible to the end user.</business_requirement>
-  </context>
+  <problem_diagnosis>
+    <issue id="1">
+      <cause>Both the primary KPI row (Investimento, Receita, Lucro, ROAS, ROI, CPA) and the secondary "Resumo detalhado" row (Cliques, Checkouts Iniciados, Vendas Aprovadas, Pendentes, AOV, Taxa de Conversão) use a grid with a low minmax floor (200px / 180px) and auto-fit, which forces all 6 items into a single cramped row on wide viewports. Cards end up narrow with values sitting close to the edges, and there's no visual breathing room.</cause>
+      <fix_required>Cap the number of columns per row (e.g. max 4 for the primary KPI row, max 3-4 for the secondary row) instead of letting auto-fit cram every item into one line. Use a higher minmax floor (e.g. 240-260px) combined with an explicit max column count via clamp/media queries so cards keep comfortable internal spacing at any viewport width, wrapping to a second row instead of shrinking.</fix_required>
+    </issue>
+    <issue id="2">
+      <cause>The primary KPI cards and the secondary "Resumo detalhado" cards use nearly identical visual treatment (same size, same font weight for values, same padding), so there's no hierarchy signaling "these are the headline numbers" vs "these are supporting detail" — everything reads as one flat wall of equally-important boxes.</cause>
+      <fix_required>Give the primary KPI row a visually heavier treatment (larger value typography, more internal padding, slightly more prominent card background/border) and keep the secondary "Resumo detalhado" row visually lighter/more compact — so the eye naturally lands on Investimento/Receita/Lucro/ROAS/ROI/CPA first, then the supporting detail below.</fix_required>
+    </issue>
+    <issue id="3">
+      <cause>After the two card rows, roughly half the page height is completely empty — there is no further content, chart, or visual element to use that space meaningfully, making the page feel unfinished.</cause>
+      <fix_required>Fill the remaining space with content that adds real analytical value: e.g. a compact trend chart (revenue/profit over time), a small comparison view (this period vs. last period), or a breakdown by traffic source — using real data from the existing summary object, not placeholder charts. If genuinely no historical data exists yet, replace the empty void with a well-designed empty state block (not just blank space) explaining what will appear there once data starts flowing.</fix_required>
+    </issue>
+    <issue id="4">
+      <cause>Card internal padding is minimal relative to the card's height, so label and value text sit close to the card borders, reinforcing the "squeezed" feeling even when column width is adequate.</cause>
+      <fix_required>Increase internal card padding and vertical spacing between label and value, and give each card a slightly taller minimum height so the content doesn't feel pressed against the edges.</fix_required>
+    </issue>
+  </problem_diagnosis>
+
+  <design_direction>
+    <principle>Grids should never sacrifice comfortable spacing to fit every item in one row — wrapping to multiple rows with generous padding always beats cramming everything into a single line.</principle>
+    <principle>Visual hierarchy between a "headline metrics" section and a "supporting detail" section must be expressed through typography scale, spacing, and card weight — not just section titles in text.</principle>
+    <principle>Empty space on a data page is a design failure, not a neutral outcome — every remaining area should either carry real analytical content or be replaced with an intentional, well-designed empty/loading state.</principle>
+  </design_direction>
+
+  <component name="primary_kpi_grid">
+    <requirement>Change grid-template-columns to something like repeat(auto-fit, minmax(240px, 1fr)) combined with a max-width constraint per card (e.g. max-width: 320px) or an explicit column-count cap via container queries/media queries, so at most 3-4 cards sit per row on typical desktop widths, wrapping to a second row for the remaining ones.</requirement>
+    <requirement>Increase card min-height and internal padding; enlarge the value typography slightly relative to the current size to reinforce these as the page's headline numbers.</requirement>
+  </component>
+
+  <component name="secondary_detail_grid">
+    <requirement>Apply the same column-capping logic (max 3-4 per row) but keep the visual weight lighter than the primary KPI cards — smaller value font size, tighter padding — to preserve hierarchy between the two rows.</requirement>
+  </component>
+
+  <component name="below_the_fold_content">
+    <requirement>Add a real content block below the two metric rows: a time-series chart (revenue/profit/spend trend) rendered from actual historical data if available, or a clearly designed "aguardando dados" empty state with an icon/illustration and a short explanation — filling the remaining vertical space intentionally rather than leaving it blank.</requirement>
+  </component>
 
   <negative_prompt>
-    <avoid>Any mock data, fake numbers, or placeholder integration statuses used to "make the UI look complete"</avoid>
-    <avoid>Raw JSON or stack traces ever reaching the browser tab — every error must be caught and rendered as a proper UI state</avoid>
-    <avoid>Keeping the single-file state.json as the source of truth for a product expected to handle real production traffic</avoid>
-    <avoid>Hardcoding Meta/Perfect Pay-specific logic directly inside route handlers — this must become an extensible provider pattern</avoid>
-    <avoid>Full-page innerHTML re-renders and blind 30s polling of every endpoint regardless of which page is active</avoid>
+    <avoid>Forcing all KPI cards into a single row regardless of viewport width</avoid>
+    <avoid>Identical visual weight between headline metrics and supporting detail metrics</avoid>
+    <avoid>Large blank areas at the bottom of a data-focused page with no content or designed empty state</avoid>
+    <avoid>Cards where padding is so tight that text touches or nearly touches the card border</avoid>
   </negative_prompt>
 
-  <priority_1 name="fix_broken_connection_flow">
-    <requirement>Replace the current target="_blank" anchor-based connect flow with a popup-window + postMessage pattern (or, if simpler given the current architecture, an in-app redirect flow using a dedicated /connections/callback route rendered by the frontend app itself, never the raw backend JSON).</requirement>
-    <requirement>Before starting any OAuth/connect flow, the backend must expose a lightweight status check (e.g. GET /api/integrations/meta/health) so the frontend can know in advance whether META_APP_ID/META_APP_SECRET are configured, and show a clear, human-readable message ("Integração ainda não configurada pelo administrador") instead of attempting a redirect that will fail.</requirement>
-    <requirement>Every failure path (missing credentials, expired code, Meta API error, Perfect Pay auth failure) must resolve to a rendered error state inside the Connections page — a toast, inline banner, or modal — never a bare JSON response shown directly to the user.</requirement>
-    <requirement>On successful connection via popup, use postMessage to notify the opener window, close the popup automatically, and refresh only the integrations data (not the full page).</requirement>
-  </priority_1>
-
-  <priority_2 name="scalability_and_performance_audit">
-    <data_layer>
-      <finding>state.json is read and rewritten in full on every single mutation, including high-frequency events like webhook receipts and click tracking. This does not scale past a small volume of test data.</finding>
-      <requirement>Migrate persistence to SQLite (via better-sqlite3 or the Node built-in node:sqlite) as the minimum viable production step — keeping it embedded/serverless-friendly for Railway, but replacing full-file read/write with real indexed tables: users, sessions, clicks, checkouts, sales, webhook_events, advertising_spend, audit_logs, products, integrations, settings.</requirement>
-      <requirement>Add indexes on frequently filtered/sorted columns: sales(gateway, gateway_transaction_id), sales(status), clicks(trackroi_click_id), webhook_events(idempotency_key) — idempotency_key must remain a unique constraint at the DB level, not just an in-memory .some() check.</requirement>
-      <requirement>Move dashboard aggregation (funnel, ROAS, ROI, CPA) into SQL aggregate queries (COUNT, SUM, GROUP BY) instead of loading full arrays into memory and reducing in JS.</requirement>
-    </data_layer>
-    <realtime_layer>
-      <finding>Frontend polls 7 endpoints every 30 seconds regardless of which page is open, and the login/session flow already establishes an authenticated connection that could carry live updates.</finding>
-      <requirement>Replace blanket polling with a WebSocket or Server-Sent-Events channel that pushes dashboard/funnel updates only when underlying data actually changes (e.g. right after a webhook event is processed), and fetch only the data needed for the currently active route on navigation.</requirement>
-    </realtime_layer>
-    <rendering_layer>
-      <finding>Every render() call replaces the entire #page-root innerHTML, discarding and rebuilding all DOM nodes even for a single metric update.</finding>
-      <requirement>Introduce a lightweight, no-build-step approach to partial DOM updates (e.g. a minimal diffing helper, or per-widget update functions that only touch the DOM nodes whose underlying value changed) so metric cards and the funnel chart animate/update in place rather than flashing on every refresh.</requirement>
-    </rendering_layer>
-  </priority_2>
-
-  <priority_3 name="plug_and_play_integration_architecture">
-    <requirement>Refactor Meta Ads and Perfect Pay from hardcoded route handlers into a common "provider" interface/module, e.g. each provider exports: { id, displayName, getAuthUrl(state), handleOAuthCallback(code, state), verifyWebhookSignature(payload, headers), normalizeWebhookEvent(payload) }.</requirement>
-    <requirement>Store connected integrations in a generic integrations table (provider_id, status, credentials_encrypted, connected_account, last_sync_at, metadata JSON) rather than fixed meta/perfectPay fields on a single object — this is what makes adding Google Ads, TikTok Ads, or another payment gateway later a matter of registering a new provider module, not rewriting the backend.</requirement>
-    <requirement>Add a provider registry so the /api/integrations endpoint and the Connections page render dynamically from whatever providers are registered, instead of the UI hardcoding two connection cards.</requirement>
-  </priority_3>
-
-  <priority_4 name="security_hardening">
-    <requirement>Make ENCRYPTION_KEY mandatory in production (fail fast on startup with a clear error if missing) rather than silently falling back to storing access tokens in plaintext — this is non-negotiable for a product that stores real ad-platform and payment-gateway credentials.</requirement>
-    <requirement>Move the in-memory CSRF token map and login rate-limiter (loginAttempts Map) to the persistent data layer or at minimum a proper cache (e.g. Redis if available on Railway, or a DB-backed table) so they survive process restarts and work correctly if the backend ever scales to more than one instance.</requirement>
-    <requirement>Add structured server-side logging (request id, user id, route, latency, status code) instead of ad-hoc console.log/console.error calls, so production issues are diagnosable.</requirement>
-  </priority_4>
-
-  <priority_5 name="ux_upgrade_300_percent">
-    <requirement>Connections page: replace the static "Faltam N conexões" text with a live, animated progress state that updates the moment a provider actually connects (via the realtime channel from priority_2), plus a visible last-sync timestamp and a "test connection" action per provider.</requirement>
-    <requirement>Every async action in the UI (connect, save settings, add product) must show an inline loading state on the specific button/element being acted on — not just a global status strip at the top of the page.</requirement>
-    <requirement>Replace generic error strings ("Não foi possível atualizar os dados: ...") with actionable, specific messages tied to what actually failed (e.g. "A Meta não respondeu — tente reconectar" vs "Sua sessão expirou").</requirement>
-    <requirement>Add empty/loading/error states as first-class, designed components for every page (dashboard, sales, funnel, products, logs) — not just the dashboard's current onboarding block.</requirement>
-  </priority_5>
-
   <deliverable_format>
-    <scope>Backend: persistence migration to SQLite, provider abstraction for integrations, security hardening, structured logging. Frontend: fixed connection flow (popup + postMessage or in-app callback route), realtime updates via WebSocket/SSE, partial DOM updates, upgraded empty/loading/error states across all pages.</scope>
-    <constraint>No mock or placeholder data anywhere in the final code. Every number, status, and connection state must reflect real backend state — if data is genuinely absent, show an honest empty state, never a fabricated value.</constraint>
-    <constraint>Preserve existing route paths and response shapes wherever possible to avoid breaking anything already deployed on Railway, unless a breaking change is required by the SQLite migration — in that case, include a one-time migration script that reads the existing state.json and imports it into the new database schema.</constraint>
+    <scope>CSS/layout fix for the Métricas page: grid column logic for both the primary KPI row and the "Resumo detalhado" row, increased card padding/hierarchy, and a real or well-designed empty-state component to fill the remaining page space. No backend/data changes required — this is a layout and information-hierarchy fix.</scope>
   </deliverable_format>
 
-</technical_audit_and_upgrade_brief>
+</layout_fix_brief>
+
+<layout_fix_brief project="TrackROI" screen="connections_page" target_agent="opencode">
+
+  <problem_diagnosis>
+    <issue id="1">
+      <cause>The `.connections-layout` grid uses default `align-items: stretch`, forcing every connection card to match the height of the tallest sibling. Meta Ads has rich content (upload zone, tags, table, two buttons) making it tall; Perfect Pay has almost no content (a connected email line and a sync timestamp), so it gets stretched into a mostly-empty box with its buttons floating awkwardly at the very bottom.</cause>
+      <fix_required>Change the grid to size each card to its own content (align-items: start / align-items: flex-start), so cards sit at natural, independent heights instead of being force-stretched to match the tallest one.</fix_required>
+    </issue>
+    <issue id="2">
+      <cause>A card with genuinely little content (a fully connected, healthy integration needing no action) currently looks broken/unfinished when placed next to a data-heavy card, because there's nothing designed to fill that visual space meaningfully.</cause>
+      <fix_required>Redesign the "connected and healthy" state of a connection card as a deliberately compact, self-contained summary (status, account identifier, last sync, a small health indicator/sparkline, and the two action buttons directly below the summary — no forced empty space). It should look intentionally minimal, not like a taller layout with missing content.</fix_required>
+    </issue>
+    <issue id="3">
+      <cause>The top "Atualize seus dados" hero banner has its step-progress indicator (✓ — ✓ with "Comece importando a planilha da Meta" caption) floating in the top-right corner, visually disconnected from the heading and body copy on the left — no shared baseline, no visual relationship between the two halves.</cause>
+      <fix_required>Redesign the hero banner as one coherent horizontal composition: heading + description on one side, and the step progress as a clearly-grouped unit (steps, connecting line, and a single caption directly under the steps) on the other, both vertically centered against each other with consistent padding — not appearing as two unrelated blocks sharing a box.</fix_required>
+    </issue>
+    <issue id="4">
+      <cause>The imported-reports table inside the Meta Ads card requires horizontal scrolling (visible scrollbar) because it has too many wide columns (DOS RELATÓRIOS, ENCERRAMENTO DOS RELATÓRIOS, NOME DA CAMPANHA, RESULTADOS) crammed into a card-width container.</cause>
+      <fix_required>Redesign this table for its actual container width: merge "Dos relatórios" and "Encerramento dos relatórios" into a single compact date-range column (e.g. "08/06 → 04/09/2026"), truncate long campaign names with an ellipsis and a tooltip/expand-on-click for the full name, and drop or right-align "Resultados" so all columns fit without a horizontal scrollbar at the card's default width.</fix_required>
+    </issue>
+    <issue id="5">
+      <cause>Button placement is inconsistent between the two cards: Meta Ads has "Importar dados" (filled) directly above "Testar importação" (ghost) right after the table; Perfect Pay has "Reconectar" (filled) and "Testar conexão" (ghost) side by side at the very bottom of a mostly empty card. There's no shared visual anchor point for actions across card types.</cause>
+      <fix_required>Establish one consistent action-bar pattern for every connection card, regardless of integration type or state: primary action (filled, purple) and secondary action (ghost) always sit inside a footer region with the same padding, alignment (side-by-side, left-aligned), and vertical position relative to the card's own content — never at a distance dictated by an unrelated sibling card's height.</fix_required>
+    </issue>
+  </problem_diagnosis>
+
+  <design_direction>
+    <principle>Every card must size itself to its own content. Visual balance between cards in the same row is achieved through consistent internal padding, typography scale, and a well-designed compact state — never through forcing equal container heights.</principle>
+    <principle>A "fully connected, no action needed" state is not an empty version of a "needs configuration" state — it is its own deliberately designed, confident, minimal state (think of how Stripe or Vercel show a healthy connected integration: compact, clear, calm, with a green accent and a couple of soft supporting metrics — not blank space).</principle>
+    <principle>Group visually related elements (a heading and its supporting UI, like the hero title and the step progress) so they read as one composition, not two separately-positioned blocks that happen to share a container.</principle>
+  </design_direction>
+
+  <component name="connections_grid">
+    <requirement>Set align-items: start (or flex-start if using flexbox) on the connections cards container so each card's height reflects only its own content.</requirement>
+    <requirement>If the height difference between adjacent cards is large, consider a masonry-style reflow on wider viewports so a short card doesn't leave a large empty column beneath it while a neighboring column continues.</requirement>
+  </component>
+
+  <component name="connection_card_connected_state">
+    <requirement>Redesign the "fully connected" card body as a compact status summary block: connected account (email/name), a green "healthy" indicator with the human-readable last-sync time, and — if data is available — a couple of small supporting stats (e.g. events received today, events failed) to give the space real informational value instead of leaving it blank.</requirement>
+    <requirement>Action buttons ("Reconectar" / "Testar conexão") sit directly beneath this summary block, not pinned to the bottom of an oversized container.</requirement>
+  </component>
+
+  <component name="connection_card_needs_import_state">
+    <requirement>Keep the CSV upload dropzone, file confirmation strip, and detected-fields tag row as-is structurally, but constrain the reports table to the card's actual width (see table fix below) so the card's total height stays proportionate rather than growing indefinitely with each additional imported report row shown.</requirement>
+    <requirement>Consider capping the visible table to the 3-5 most recent imports with a "Ver histórico completo" link/expand action, rather than growing the card height with every row.</requirement>
+  </component>
+
+  <component name="imported_reports_table">
+    <requirement>Merge date-range columns into one, truncate long campaign names with ellipsis + title attribute (or a click-to-expand tooltip), and ensure the column set fits the card's width at common breakpoints without a horizontal scrollbar.</requirement>
+  </component>
+
+  <component name="hero_banner">
+    <requirement>Rebuild as a single flex row: left side = heading + description (as now), right side = a self-contained step-progress unit where the numbered/checked circles, connecting line, and caption text are grouped together with consistent spacing and share a vertical center alignment with the left side's content — not floated independently in a corner.</requirement>
+  </component>
+
+  <negative_prompt>
+    <avoid>Equal-height stretched cards that create dead empty space in the shorter one</avoid>
+    <avoid>Any UI element positioned "because it landed there" rather than deliberately grouped with related content</avoid>
+    <avoid>Tables wider than their container requiring horizontal scroll at default viewport widths</avoid>
+    <avoid>Treating a "connected/healthy" integration state as a lesser or incomplete-looking version of the "needs setup" state</avoke>
+  </negative_prompt>
+
+  <deliverable_format>
+    <scope>CSS/layout fix for the Connections page only: grid alignment, connection-card internal structure for both "connected" and "needs action" states, the imported-reports table, and the hero banner composition. No backend logic changes required for this pass — purely visual/structural.</scope>
+  </deliverable_format>
+
+</layout_fix_brief>

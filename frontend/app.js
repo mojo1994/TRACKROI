@@ -864,9 +864,146 @@ function metricsPage(data) {
   const periodLabel = summary.period?.label
     ? `Período: ${summary.period.label} · calculado com dados reais do período`
     : "Indicadores calculados automaticamente.";
+  const trend = data.trend || null;
+  const hasTrend = Boolean(
+    trend &&
+      Array.isArray(trend.points) &&
+      trend.points.length > 0 &&
+      !(trend.totals && trend.totals.empty)
+  );
+  const evolution = hasTrend
+    ? sectionPanel("Evolução no período", "Investimento, receita e lucro por dia — do seu próprio histórico.", trendChartHtml(trend))
+    : sectionPanel("Evolução no período", "O gráfico aparece aqui assim que houver dados de investimento, cliques ou vendas.", metricsEmptyStateHtml(data.empty === true));
   return `
     ${renderMetricCards(data.cards || [])}
-    ${sectionPanel("Resumo financeiro e operacional", periodLabel, metricsSummary(summary))}
+    ${sectionPanel("Resumo detalhado", periodLabel, metricsSummary(summary))}
+    ${evolution}
+  `;
+}
+
+function shortMoney(cents) {
+  const value = Math.round(Number(cents) || 0);
+  const nf = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
+  if (value >= 1000000) return `R$ ${nf.format(value / 1000000)} mi`;
+  if (value >= 1000) return `R$ ${nf.format(value / 1000)} mil`;
+  return money(value);
+}
+
+function trendChartHtml(trend) {
+  const points = trend.points || [];
+  const n = points.length;
+  const W = 920;
+  const H = 260;
+  const padL = 10;
+  const padR = 10;
+  const padT = 14;
+  const padB = 26;
+  const plotH = H - padT - padB;
+  const baseline = H - padB;
+  const maxVal = Math.max(...points.map((p) => Math.max(p.spendCents, p.revenueCents, Math.max(0, p.profitCents))), 1);
+  const xAt = (i) => (n > 1 ? padL + (i / (n - 1)) * (W - padL - padR) : padL);
+  const yAt = (v) => baseline - (Math.max(0, Number(v) || 0) / maxVal) * plotH;
+
+  const spendPts = points.map((p, i) => [xAt(i), yAt(p.spendCents)]);
+  const revPts = points.map((p, i) => [xAt(i), yAt(p.revenueCents)]);
+  const profitPts = points.map((p, i) => {
+    const y = yAt(p.profitCents);
+    return [xAt(i), y > baseline ? baseline : y];
+  });
+
+  const spendLine = curveThrough(spendPts);
+  const revArea = `${revPts[0][0].toFixed(1)} ${baseline} L ${curveThrough(revPts).slice(1)} L ${revPts[n - 1][0].toFixed(1)} ${baseline} Z`;
+  const profitArea = `${profitPts[0][0].toFixed(1)} ${baseline} L ${curveThrough(profitPts).slice(1)} L ${profitPts[n - 1][0].toFixed(1)} ${baseline} Z`;
+
+  const fmtDay = (iso) => {
+    const date = new Date(`${iso}T12:00:00Z`);
+    return Number.isNaN(date.getTime())
+      ? iso
+      : date.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  };
+  const firstLabel = fmtDay(points[0].date);
+  const midLabel = n > 2 ? fmtDay(points[Math.floor((n - 1) / 2)].date) : "";
+  const lastLabel = fmtDay(points[n - 1].date);
+  const midX = n > 2 ? (xAt(Math.floor((n - 1) / 2)) + xAt(n - 1)) / 2 : W - padR;
+
+  const smoothAxis = [0, Math.round(maxVal / 2), maxVal];
+
+  const yTicks = smoothAxis
+    .map((val, i) => {
+      const y = yAt(val);
+      if (i > 0 && yAt(smoothAxis[i - 1]) - y < 8) return "";
+      return `
+        <line class="trend-grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${(W - padR).toFixed(1)}" y2="${y.toFixed(1)}" />
+        <text class="trend-axis" x="${(W - padR - 4).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="end">${val > 0 ? shortMoney(val) : "0"}</text>
+      `;
+    })
+    .join("");
+
+  const legend = `
+    <ul class="trend-legend">
+      <li><span class="trend-swatch green"></span>Receita aprovada</li>
+      <li><span class="trend-swatch violet"></span>Investimento</li>
+      <li><span class="trend-swatch muted"></span>Lucro</li>
+    </ul>
+  `;
+
+  const xLabels = `
+    <text class="trend-axis trend-axis-label" x="${padL}" y="${(H - 6).toFixed(1)}" text-anchor="start">${firstLabel}</text>
+    ${midLabel ? `<text class="trend-axis trend-axis-label" x="${midX.toFixed(1)}" y="${(H - 6).toFixed(1)}" text-anchor="middle">${midLabel}</text>` : ""}
+    <text class="trend-axis trend-axis-label" x="${(W - padR).toFixed(1)}" y="${(H - 6).toFixed(1)}" text-anchor="end">${lastLabel}</text>
+  `;
+
+  const dots = revPts
+    .map(([x, y], i) => `<circle class="trend-dot" style="color:var(--green)" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.4" title="${fmtDay(points[i].date)}: ${money(points[i].revenueCents)}">`)
+    .join("");
+
+  const totals = trend.totals || {};
+  const totalChips = `
+    <div class="trend-totals">
+      <span class="trend-total">Investimento<strong>${money(totals.spendCents)}</strong></span>
+      <span class="trend-total">Receita aprovada<strong>${money(totals.revenueCents)}</strong></span>
+      <span class="trend-total">Lucro bruto<strong>${money(totals.revenueCents - totals.refundCents - totals.spendCents)}</strong></span>
+      <span class="trend-total">Cliques<strong>${new Intl.NumberFormat("pt-BR").format(totals.clicks)}</strong></span>
+    </div>
+  `;
+
+  return `
+    ${legend}
+    <div class="trend-stage">
+      <svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolução de investimento, receita e lucro no período">
+        ${yTicks}
+        <path class="trend-area-profit" d="${profitArea}" fill="rgba(255,255,255,0.5)" />
+        <path class="trend-area" d="${revArea}" fill="var(--green)" />
+        <path class="trend-line violet" d="${spendLine}" />
+        <path class="trend-line green" d="${curveThrough(revPts)}" />
+        <path class="trend-line muted" d="${curveThrough(profitPts)}" stroke-dasharray="4 5" />
+        ${dots}
+        ${xLabels}
+      </svg>
+    </div>
+    ${totalChips}
+  `;
+}
+
+function metricsEmptyStateHtml(noData) {
+  const copy = noData
+    ? "Importe as planilhas do Gerenciador de Anúncios e do seu gateway de pagamento. Assim que os primeiros dados chegarem, o gráfico de evolução (investimento, receita e lucro por dia) aparece aqui automaticamente."
+    : "Esse período ainda não tem dados com datas distribuídas. Exporte e importe novamente, ou troque o período acima — o gráfico de evolução se preenche sozinho.";
+  return `
+    <div class="trend-empty">
+      <div class="trend-empty-icon">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 17 8 11l4 4 9-9" />
+          <path d="M15 6h6v6" />
+        </svg>
+      </div>
+      <h3>Aguardando dados</h3>
+      <p>${copy}</p>
+      <div class="trend-empty-actions">
+        <a class="btn-primary" href="#connections">Importar planilha</a>
+        <button type="button" class="btn-ghost" data-refresh-chart>Atualizar</button>
+      </div>
+    </div>
   `;
 }
 
@@ -896,13 +1033,34 @@ function productsPage(data) {
   `;
 }
 
+function connectedSummaryHtml(item) {
+  const nf = new Intl.NumberFormat("pt-BR");
+  const account = item.connectedAccount || item.adAccountId || "conta conectada";
+  const lastSync = item.lastSyncAt ? formatDateTime(item.lastSyncAt) : "—";
+  const lastEvent = item.lastReceivedEventAt ? formatDateTime(item.lastReceivedEventAt) : null;
+  const failures = Array.isArray(item.errors) && item.errors.length ? item.errors.length : 0;
+  const imports = item.importsCount != null ? nf.format(item.importsCount) : null;
+  return `
+    <div class="conn-summary">
+      <div class="conn-health"><span class="conn-health-dot"></span>Conectado e saudável</div>
+      <div class="conn-account">${escapeHtml(account)}</div>
+      <div class="conn-stats">
+        <span>Última sincronização: <b>${escapeHtml(lastSync)}</b></span>
+        ${imports ? `<span>Importações: <b>${escapeHtml(imports)}</b></span>` : ""}
+        ${lastEvent ? `<span>Último evento: <b>${escapeHtml(lastEvent)}</b></span>` : ""}
+        <span>Falhas recentes: <b class="${failures > 0 ? "is-warn" : ""}">${failures}</b></span>
+      </div>
+    </div>
+  `;
+}
+
 function connectionCard(item) {
   const connected = item.connected === true;
   const status = connected || item.status === "connected" ? "connected" : item.status || "not_connected";
   const notConfigured = item.configured === false;
   const isMeta = item.id === "meta";
   const actions = isMeta
-    ? `<button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar importação</button>`
+    ? ""
     : `
       ${notConfigured
         ? `<span class="ghost" disabled>Configuração pendente</span>`
@@ -911,24 +1069,20 @@ function connectionCard(item) {
     `;
   const body = isMeta
     ? `
-      <div class="connection-line">
-        ${connected
-          ? "Dados importados das planilhas exportadas do Gerenciador de Anúncios."
-          : "Exporte seus dados como arquivo CSV e importe para atualizar o funil, as métricas, vendas e o ROI."}
-      </div>
-      ${item.lastSyncAt ? `<div class="connection-line muted">Última importação: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
+      ${connected ? connectedSummaryHtml(item) : ""}
+      ${connected ? "" : `<div class="connection-line">Exporte seus dados como arquivo CSV e importe para atualizar o funil, as métricas, vendas e o ROI.</div>`}
       ${importPanelHtml(item)}
     `
     : `
-      <div class="connection-line">
-        ${connected
-          ? `Conectado${item.connectedAccount ? ` — ${escapeHtml(item.connectedAccount)}` : ""}.`
-          : notConfigured
-            ? "Integração ainda não configurada pelo administrador."
-            : escapeHtml(item.healthMessage || "Sua ferramenta ainda não está conectada.")}
-      </div>
-      ${item.lastSyncAt ? `<div class="connection-line muted">Última sincronização: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
+      ${connected
+        ? connectedSummaryHtml(item)
+        : `<div class="connection-line">
+            ${notConfigured
+              ? "Integração ainda não configurada pelo administrador."
+              : escapeHtml(item.healthMessage || "Sua ferramenta ainda não está conectada.")}
+          </div>`}
       <div class="connection-message" data-connect-message="${escapeHtml(item.id)}" hidden></div>
+      <div class="connection-actions">${actions}</div>
     `;
   return `
     <article class="connection-card ${connected ? "is-connected" : ""} ${isMeta ? "is-import" : ""}" data-provider-card="${escapeHtml(item.id)}">
@@ -942,9 +1096,6 @@ function connectionCard(item) {
       </div>
       <div class="connection-card-body">
         ${body}
-        <div class="connection-actions">
-          ${actions}
-        </div>
       </div>
     </article>
   `;
@@ -963,8 +1114,9 @@ function importPanelHtml(item) {
       </div>
       <div class="import-filename" data-import-filename hidden></div>
       <div class="import-preview" data-import-preview hidden></div>
-      <div class="import-actions">
+      <div class="connection-actions">
         <button type="button" class="btn-primary" data-import-submit disabled>Importar dados</button>
+        <button type="button" class="ghost" data-test-button="${escapeHtml(item.id || "meta")}">Testar importação</button>
         <span class="import-status" data-import-status></span>
       </div>
     </div>
@@ -1440,6 +1592,10 @@ function attachPageHandlers() {
 
   const reload = el("reload-button");
   if (reload) reload.onclick = () => loadData(state.route);
+
+  document.querySelectorAll("[data-refresh-chart]").forEach((node) => {
+    node.onclick = () => loadData(state.route);
+  });
 
   const source = el("source-filter");
   if (source) {

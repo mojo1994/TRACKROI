@@ -1040,7 +1040,9 @@ async function main() {
         const period = resolvePeriod(query);
         const source = String(query.source || "all").toLowerCase();
         const aggregates = db.dashboardAggregates(source, period);
-        send(res, 200, buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance }), {}, req);
+        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance });
+        dashboard.trend = db.dailyTrend(source, period);
+        send(res, 200, dashboard, {}, req);
         return;
       }
 

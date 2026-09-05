@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Política de Privacidade — TrackROI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0a0c;
+        --bg-2: #0e0e11;
+        --panel: #121216;
+        --panel-2: #17171c;
+        --hairline: rgba(255, 255, 255, 0.07);
+        --hairline-strong: rgba(255, 255, 255, 0.13);
+        --text: #f4f4f0;
+        --muted: #9a9aa5;
+        --faint: #6b6b76;
+        --green: #39ff88;
+        --violet-soft: #b18cff;
+        --radius: 14px;
+        --radius-sm: 10px;
+        --font: "Inter", "Segoe UI", Arial, sans-serif;
+        --font-display: "Space Grotesk", "Inter", "Segoe UI", sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; }
+      body {
+        background:
+          radial-gradient(1100px 480px at 12% -12%, rgba(138, 43, 226, 0.08), transparent 60%),
+          radial-gradient(900px 420px at 100% -8%, rgba(57, 255, 136, 0.05), transparent 55%),
+          var(--bg);
+        background-attachment: fixed;
+        color: var(--text);
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.7;
+      }
+      a { color: var(--violet-soft); }
+      .wrap { max-width: 780px; margin: 0 auto; padding: 40px 22px 80px; }
+      .brand {
+        display: inline-flex; align-items: center; gap: 12px;
+        text-decoration: none; color: inherit; margin-bottom: 40px;
+      }
+      .brand-mark {
+        flex: 0 0 40px; width: 40px; height: 40px; border-radius: 11px;
+        display: grid; place-items: center;
+        background: linear-gradient(145deg, #22123a, #0e0b16);
+        border: 1px solid rgba(138, 43, 226, 0.45);
+        font-weight: 700; font-family: var(--font-display); font-size: 19px;
+        color: #d7c4ff;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 22px rgba(138, 43, 226, 0.22);
+      }
+      .brand-name { font-size: 18px; font-weight: 700; font-family: var(--font-display); letter-spacing: -0.02em; }
+      .brand-subtitle { font-size: 11px; color: var(--muted); }
+      .eyebrow {
+        text-transform: uppercase; font-size: 11px; letter-spacing: 0.16em;
+        font-weight: 600; margin-bottom: 8px; color: var(--faint);
+      }
+      h1 {
+        margin: 0 0 6px; font-size: 32px; line-height: 1.15; letter-spacing: -0.025em;
+        font-family: var(--font-display); font-weight: 600;
+      }
+      .lead { color: var(--muted); font-size: 15px; max-width: 60ch; margin: 0 0 34px; }
+      .updated { font-size: 12.5px; color: var(--faint); font-variant-numeric: tabular-nums; margin-top: 10px; }
+      .card {
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent), var(--panel);
+        padding: 22px 26px 10px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+      }
+      .card + .card { margin-top: 18px; }
+      h2 {
+        margin: 0 0 10px; font-size: 17px; font-weight: 600;
+        font-family: var(--font-display); letter-spacing: -0.01em;
+        display: flex; align-items: baseline; gap: 10px;
+      }
+      h2 .num {
+        flex: 0 0 auto; font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+        color: #d7c4ff; border: 1px solid rgba(138, 43, 226, 0.4);
+        background: rgba(138, 43, 226, 0.1); border-radius: 7px;
+        padding: 1px 7px;
+      }
+      p { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+      ul { margin: 0 0 12px; padding-left: 20px; }
+      li { color: var(--muted); font-size: 14px; margin-bottom: 6px; }
+      strong { color: var(--text); font-weight: 600; }
+      .back {
+        display: inline-flex; align-items: center; gap: 8px;
+        margin-top: 34px; color: var(--muted); text-decoration: none;
+        font-size: 13.5px; font-weight: 600;
+      }
+      .back:hover { color: var(--text); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <a class="brand" href="/">
+        <div class="brand-mark">T</div>
+        <div>
+          <div class="brand-name">TrackROI</div>
+          <div class="brand-subtitle">Rastreamento de vendas</div>
+        </div>
+      </a>
+
+      <div class="eyebrow">TrackROI</div>
+      <h1>Política de Privacidade</h1>
+      <p class="lead">Esta página explica como o TrackROI coleta, usa, armazena e protege as informações tratadas pelo serviço, em conformidade com a Lei Geral de Proteção de Dados (LGPD — Lei nº 13.709/2018).</p>
+      <div class="updated">Última atualização: 05 de setembro de 2026</div>
+
+      <section class="card">
+        <h2><span class="num">1</span>Controlador dos dados</h2>
+        <p>O TrackROI é uma ferramenta de rastreamento e análise de resultados de tráfego pago e vendas. Ao utilizar o serviço, você é o titular dos dados inseridos na sua conta, e a sua empresa atua como controladora das informações declaradas nas planilhas importadas.</p>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">2</span>Dados coletados</h2>
+        <ul>
+          <li><strong>Dados de conta:</strong> nome, e-mail e perfil de acesso utilizado para autenticação no painel.</li>
+          <li><strong>Dados de campanha:</strong> informações exportadas por você do Gerenciador de Anúncios, como investimento, cliques, impressões, campanhas e períodos dos relatórios.</li>
+          <li><strong>Dados de vendas e checkout:</strong> eventos recebidos do seu gateway de pagamento, como valor, status e identificadores de transação.</li>
+          <li><strong>Dados técnicos:</strong> identificadores de clique e registros de eventos recebidos, utilizados para correlacionar cliques e vendas.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">3</span>Finalidade do tratamento</h2>
+        <ul>
+          <li>Calcular métricas de performance, funil de conversão, ROAS, ROI, CPA e demais indicadores do painel.</li>
+          <li>Correlacionar cliques com vendas para atribuição correta de resultados por fonte de tráfego.</li>
+          <li>Operar, manter e melhorar os recursos do serviço, incluindo suporte e segurança.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">4</span>Compartilhamento</h2>
+        <p>O TrackROI não vende e nem compartilha os seus dados com terceiros para fins publicitários. O acesso é restrito à sua conta e à infraestrutura necessária para a operação do serviço (aplicação, banco de dados e rede). Dados só serão repassados fora desse escopo mediante obrigação legal ou autorização expressa sua.</p>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">5</span>Armazenamento e segurança</h2>
+        <ul>
+          <li>Senhas são armazenadas apenas na forma de hash criptográfico (nunca em texto puro).</li>
+          <li>Segredos de integração (tokens e chaves de webhook) são criptografados em repouso.</li>
+          <li>Sessões possuem expiração automática e tokens de proteção contra falsificação de requisições (CSRF).</li>
+          <li>Dados são mantidos em isolamento por conta, e o acesso ao painel é protegido por autenticação.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">6</span>Retenção</h2>
+        <p>Os dados são mantidos enquanto a sua conta estiver ativa, para que o histórico de métricas continue disponível. Ao solicitar a exclusão da conta, os dados associados são removidos do ambiente operacional em prazo compatível com o ciclo de cópias de segurança.</p>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">7</span>Seus direitos (LGPD)</h2>
+        <p>Você pode solicitar, a qualquer momento:</p>
+        <ul>
+          <li>Confirmação da existência de tratamento dos seus dados;</li>
+          <li>Correção de dados incompletos, inexatos ou desatualizados;</li>
+          <li>Anonimização, bloqueio ou eliminação de dados desnecessários;</li>
+          <li>Portabilidade dos dados, nos termos da legislação.</li>
+        </ul>
+        <p>Para exercer os seus direitos, utilize os canais de contato indicados abaixo.</p>
+      </section>
+
+      <section class="card">
+        <h2><span class="num">8</span>Contato</h2>
+        <p>Em caso de dúvidas sobre esta política ou sobre o tratamento dos seus dados, fale conosco pelo e-mail <a href="mailto:privacidade@trackroi.app">privacidade@trackroi.app</a>.</p>
+      </section>
+
+      <a class="back" href="/">← Voltar para o painel</a>
+    </div>
+  </body>
+</html>

@@ -17,7 +17,11 @@ function contentType(filePath) {
 const server = http.createServer((req, res) => {
   const requestPath = req.url === "/" ? "/index.html" : req.url.split("?")[0];
   const safePath = path.normalize(requestPath).replace(/^(\.\.(\/|\\|$))+/, "");
-  const filePath = path.join(ROOT, safePath);
+  let filePath = path.join(ROOT, safePath);
+  if (!path.extname(filePath)) {
+    const htmlCandidate = `${filePath}.html`;
+    if (fs.existsSync(htmlCandidate)) filePath = htmlCandidate;
+  }
 
   fs.readFile(filePath, (error, data) => {
     if (error) {

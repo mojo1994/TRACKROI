@@ -1,0 +1,10 @@
+{
+  "name": "trackroi-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}

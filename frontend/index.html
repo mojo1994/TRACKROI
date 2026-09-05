@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrackROI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app-view" class="app-shell">
+      <aside class="sidebar">
+        <button id="sidebar-toggle" class="brand sidebar-toggle" type="button" aria-label="Alternar menu lateral">
+          <div class="brand-mark">T</div>
+          <div class="sidebar-brand-text">
+            <div class="brand-name">TrackROI</div>
+            <div class="brand-subtitle">Attribution analytics</div>
+          </div>
+        </button>
+
+        <nav class="nav" id="nav-links">
+          <a class="nav-item active" href="#dashboard" data-route="dashboard"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">Dashboard</span></a>
+          <a class="nav-item" href="#sales" data-route="sales"><span class="nav-icon" data-icon="sales"></span><span class="nav-label">Vendas</span></a>
+          <a class="nav-item" href="#funnel" data-route="funnel"><span class="nav-icon" data-icon="funnel"></span><span class="nav-label">Funil</span></a>
+          <a class="nav-item" href="#metrics" data-route="metrics"><span class="nav-icon" data-icon="metrics"></span><span class="nav-label">Métricas</span></a>
+          <a class="nav-item" href="#products" data-route="products"><span class="nav-icon" data-icon="products"></span><span class="nav-label">Produtos</span></a>
+          <a class="nav-item" href="#tools" data-route="tools"><span class="nav-icon" data-icon="tools"></span><span class="nav-label">Ferramentas</span></a>
+          <a class="nav-item" href="#connections" data-route="connections"><span class="nav-icon" data-icon="connections"></span><span class="nav-label">Conexões</span></a>
+          <a class="nav-item" href="#settings" data-route="settings"><span class="nav-icon" data-icon="settings"></span><span class="nav-label">Configurações</span></a>
+          <a class="nav-item" href="#logs" data-route="logs"><span class="nav-icon" data-icon="logs"></span><span class="nav-label">Logs</span></a>
+        </nav>
+
+        <div class="sidebar-panel">
+          <div class="panel-title">Conexões e Rastreamento</div>
+          <div class="panel-line">Abra a área de conexões para ligar Meta Ads e Perfect Pay com o básico necessário.</div>
+        </div>
+
+        <button id="logout-button" type="button" class="logout-button"><span class="nav-icon" data-icon="logout"></span><span class="logout-label">Sair</span></button>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow" id="page-eyebrow">Dashboard</div>
+            <h1 id="page-title">Resumo operacional</h1>
+          </div>
+          <div class="topbar-controls" id="page-controls"></div>
+        </header>
+
+        <section class="status-strip" id="status-strip">Carregando...</section>
+
+        <section id="page-root"></section>
+      </main>
+    </div>
+
+    <div id="login-view" class="login-overlay">
+      <section class="login-card">
+        <div class="brand login-brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <div class="brand-name">TrackROI</div>
+            <div class="brand-subtitle">Attribution analytics</div>
+          </div>
+        </div>
+
+        <form id="login-form" class="login-form">
+          <h1>Entrar</h1>
+          <p class="panel-line">Acesse o painel com sua conta.</p>
+          <label>
+            <span>Email</span>
+            <input id="email-input" type="email" autocomplete="username" />
+          </label>
+          <label>
+            <span>Senha</span>
+            <input id="password-input" type="password" autocomplete="current-password" />
+          </label>
+          <button type="submit">Entrar</button>
+          <div id="login-error" class="login-error" hidden></div>
+          <div class="auth-switch">
+            Não tem conta?
+            <a id="go-register" href="#">Criar conta</a>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="register-view" class="login-overlay">
+      <section class="login-card">
+        <div class="brand login-brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <div class="brand-name">TrackROI</div>
+            <div class="brand-subtitle">Attribution analytics</div>
+          </div>
+        </div>
+
+        <form id="register-form" class="login-form">
+          <h1>Criar conta</h1>
+          <p class="panel-line">Cadastre-se para começar a rastrear suas vendas.</p>
+          <label>
+            <span>Nome</span>
+            <input id="register-name" type="text" autocomplete="name" />
+          </label>
+          <label>
+            <span>Email</span>
+            <input id="register-email" type="email" autocomplete="email" />
+          </label>
+          <label>
+            <span>Senha</span>
+            <input id="register-password" type="password" autocomplete="new-password" />
+          </label>
+          <label>
+            <span>Confirmar senha</span>
+            <input id="register-password-confirm" type="password" autocomplete="new-password" />
+          </label>
+          <button type="submit">Criar conta</button>
+          <div id="register-error" class="login-error" hidden></div>
+          <div class="auth-switch">
+            Já tem conta?
+            <a id="go-login" href="#">Fazer login</a>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

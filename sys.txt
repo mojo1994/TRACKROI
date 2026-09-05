@@ -1,0 +1,528 @@
+# TrackROI — Technical Audit & Final Master Prompt
+
+> Prepared by: Senior SaaS Architect / Backend / Tracking & Attribution / API Integration / Data / Security / QA / Product Design review.
+> Scope: Private, internal marketing-attribution SaaS. Initial integrations: **Meta Ads (Marketing API)** and **Perfect Pay**.
+
+---
+
+## AUDIT
+
+### SECTION 1 — Executive Technical Assessment
+
+TrackROI is, at its core, an **event-correlation and financial-attribution system**, not a dashboard. The dashboard is the visible surface; the actual hard engineering problem is:
+
+1. Reliably capturing a click (with ad-level identity) before the user reaches checkout.
+2. Reliably capturing a payment event (approved / refunded / chargeback) exactly once.
+3. Correctly joining #1 and #2 even when the join key is imperfect (missing UTMs, lost `fbclid`, multi-device, delayed webhooks).
+4. Computing financial metrics (ROAS, ROI, CPA, break-even) from that join in a way that never lies to the user.
+
+The biggest risks are not UI risks — they are **data-integrity risks**: duplicate sales from webhook retries, double-counted spend from a botched sync job, and silently wrong attribution from a leaky click-id system. The audit below is organized around eliminating those risks before a single dashboard card is built.
+
+**Verdict:** Feasible with a conventional, boring, well-tested architecture. The temptation to make this "AI-generated SaaS pretty" is explicitly rejected per the design constraints — this is closer to a fintech reconciliation system with a dashboard bolted on than a marketing dashboard with some data behind it.
+
+---
+
+### SECTION 2 — Feasibility
+
+| Component | Feasibility | Notes |
+|---|---|---|
+| Meta Marketing API sync (spend/campaigns/ads) | High | Well-documented, stable, but **rate-limited and versioned** — `VERIFY AGAINST CURRENT OFFICIAL DOCUMENTATION` for current API version, field names, and rate-limit tiers. |
+| Meta conversions data (if used) | Medium | Meta-side conversion reporting is attributed by Meta's own model, which will *never* perfectly match TrackROI's own last-click model. This must be surfaced as "Meta-reported" vs "TrackROI-attributed" — never merged into one number. |
+| Perfect Pay webhook ingestion | High | Standard webhook pattern, but exact payload schema, event names, and signature/authentication mechanism must be confirmed against **current Perfect Pay developer documentation** — `VERIFY AGAINST CURRENT OFFICIAL DOCUMENTATION`. |
+| Perfect Pay reconciliation API | Medium | Depends entirely on what read/list endpoints Perfect Pay currently exposes; if only webhooks exist, reconciliation must be redesigned as a **manual/admin-triggered re-request** rather than a polling job. |
+| First-party click/attribution tracking | High | Standard first-party cookie + server-side click table pattern. iOS/Safari ITP and ad-blockers are known, permanent limitations — not solvable, only mitigated. |
+| Real-time dashboard updates | High | Achievable via WebSocket/SSE or short-interval polling off a materialized metrics table — not via naive full-page reload. |
+
+---
+
+### SECTION 3 — Recommended Architecture
+
+**Pattern:** Modular monolith with clearly separated domains, backed by a job queue for anything external (Meta sync, webhook post-processing, reconciliation). Avoid microservices at this stage — the team is internal/private and a distributed system adds operational risk without a corresponding benefit at this scale.
+
+```
+┌─────────────────────────────┐
+│         Frontend (SPA)       │  Dashboard, Settings, Connections
+└──────────────┬───────────────┘
+               │ REST/GraphQL (auth'd)
+┌──────────────▼───────────────┐
+│        API / App Server       │  Auth, RBAC, domain logic, metric engine
+└──────┬───────────────┬────────┘
+       │               │
+┌──────▼──────┐  ┌─────▼──────┐
+│  Job Queue   │  │  Webhook    │  Dedicated, minimal-dependency endpoint
+│ (sync, retry)│  │  Ingestion  │  (validate → persist raw → ack fast)
+└──────┬──────┘  └─────┬──────┘
+       │               │
+┌──────▼───────────────▼────────┐
+│         PostgreSQL             │  Source of truth, normalized
+└─────────────────────────────────┘
+```
+
+Key architectural decisions:
+- **Webhook endpoint does the minimum possible work synchronously**: validate signature/shape → persist raw payload → enqueue processing job → return 200 fast. All business logic (dedup, attribution, metric update) happens asynchronously in a worker. This is the single most important reliability decision in the system.
+- **Metric engine reads from precomputed snapshots**, never recalculates from raw events on every dashboard request — protects against slow queries as data grows.
+- **Meta sync is pull-based and idempotent**, keyed by (ad_account_id, entity_id, date), so re-running a sync never double-counts spend.
+
+---
+
+### SECTION 4 — Technology Stack
+
+> Given the coding agent will build this in an existing repo, the master prompt instructs it to **detect and respect the existing stack first**. The recommendation below is the default if starting greenfield.
+
+- **Backend:** Node.js (TypeScript) or Python — either is fine; TypeScript recommended for shared types with frontend.
+- **Framework:** NestJS (Node) or FastAPI (Python) — both give strong structure for domain separation, DI, and validation.
+- **Database:** PostgreSQL (mandatory — relational integrity is critical for financial data).
+- **Job queue:** Redis-backed (BullMQ for Node, Celery/RQ for Python).
+- **Frontend:** React + TypeScript, component library kept minimal/custom per the design system constraints (no heavy pre-styled kits that fight the "no glassmorphism / no pill buttons" rules).
+- **Real-time transport:** WebSocket (Socket.IO) or Server-Sent Events for dashboard push updates.
+- **Auth:** Session or JWT with refresh tokens, server-side session store recommended for an internal tool (simpler revocation).
+
+---
+
+### SECTION 5 — Database Architecture
+
+Core entity groups (PostgreSQL, normalized, all tables timestamped with `created_at`/`updated_at`, soft-delete where destructive actions are possible):
+
+**Identity & access:** `users`, `organizations`, `roles`, `permissions`, `user_roles`
+
+**Product & finance config:** `products`, `product_costs` (fees, taxes, commissions, fulfillment), `financial_settings`
+
+**Advertising:** `ad_accounts`, `campaigns`, `ad_sets`, `ads`, `advertising_spend` (daily grain, unique on account+entity+date)
+
+**Tracking & attribution:** `sessions`, `clicks` (holds `trackroi_click_id`, `fbclid`, all UTMs, campaign/adset/ad ids, landing_page, timestamp), `tracking_events`, `attribution_records` (explicit join table between a click and a sale, storing the model used)
+
+**Commerce:** `checkouts`, `sales`, `sale_events` (append-only status history: pending → approved → refunded → chargeback), `refunds`, `chargebacks`
+
+**Integrations & reliability:** `integrations`, `webhook_events` (raw payload + status + idempotency key, UNIQUE constraint), `webhook_attempts` (retry history per event), `synchronization_jobs`, `synchronization_logs`
+
+**Reporting:** `metric_snapshots` (precomputed, keyed by date+dimension), `settings`, `audit_logs`
+
+Critical constraints:
+- `webhook_events.idempotency_key` **UNIQUE** — this single constraint is what prevents duplicate sales at the database level, independent of application logic.
+- `advertising_spend` **UNIQUE(ad_account_id, entity_type, entity_id, date)** — prevents double-counted spend on re-sync.
+- `sales.gateway_transaction_id` **UNIQUE per gateway** — a second webhook for the same transaction updates the existing row via `sale_events`, never inserts a new sale.
+
+---
+
+### SECTION 6 — Meta Integration Architecture
+
+- Authorization: standard OAuth flow for Meta Business, token stored **encrypted at rest, server-side only** — never sent to the frontend.
+- Token lifecycle: short-lived user tokens must be exchanged for a long-lived token per Meta's documented flow; expiration and re-auth prompts must be handled explicitly in the Connections UI (`VERIFY AGAINST CURRENT OFFICIAL DOCUMENTATION` for current token lifetimes and exchange endpoint).
+- Sync strategy: scheduled incremental sync (e.g., last N days re-pulled daily to catch late-attributed conversions Meta itself revises) + a manual "sync now" + a one-time historical backfill.
+- Rate limits: Meta enforces account-level and app-level rate limits that vary by tier — the agent must implement **exponential backoff and respect `X-Business-Use-Case-Usage` (or current equivalent) headers**, not just retry blindly. `VERIFY AGAINST CURRENT OFFICIAL DOCUMENTATION` for the exact header/mechanism in use at implementation time.
+- Pagination: Marketing API responses are cursor-paginated — the sync job must follow `paging.next` until exhausted, never assume a single page.
+- API versioning: Meta deprecates API versions on a rolling schedule — the integration must pin to an explicit version and the master prompt must instruct the agent to check the currently-supported version range before implementing.
+- Currency: Meta reports spend in the **ad account's configured currency**, which may differ from TrackROI's reporting currency — conversion (if needed) must be explicit and logged, never silently assumed to be 1:1.
+
+---
+
+### SECTION 7 — Perfect Pay Integration Architecture
+
+- Primary channel: **webhooks**, treated as the real-time source of truth.
+- Secondary channel: **reconciliation** via Perfect Pay's API (if a list/query endpoint is currently available) to catch missed or delayed webhooks — run on a schedule (e.g., hourly) comparing known transaction IDs against TrackROI's `sales` table, never blindly re-inserting.
+- Authentication/signature verification method for Perfect Pay webhooks must be confirmed against current documentation — `VERIFY AGAINST CURRENT OFFICIAL DOCUMENTATION`. Do not assume HMAC-SHA256 or any specific scheme without confirming.
+- Event coverage required: approved, pending, rejected, cancelled, refunded, chargeback, and recurring/subscription events if the product catalog includes subscriptions.
+- Attribution metadata: Perfect Pay checkouts must be configured to pass `trackroi_click_id` (or the full UTM set as fallback) through to the payment flow so the webhook payload — or an associated custom field/URL parameter — carries it back. This linkage must be verified against what Perfect Pay's checkout actually supports passing through today.
+
+---
+
+### SECTION 8 — Webhook Architecture
+
+Treated as mission-critical per the brief. Pipeline:
+
+```
+Receive → Verify signature/shape → Persist RAW payload (status: received)
+   → Enqueue → [ASYNC] Deduplicate (idempotency_key) → Normalize
+   → Attribute → Update metric snapshots → Push dashboard update
+```
+
+- **Idempotency key** = gateway name + gateway transaction ID + event type (not just transaction ID, since the same transaction can legitimately have multiple distinct events — pending, then approved, then refunded).
+- **Duplicate delivery** (same event, same idempotency key, redelivered) → recognized and discarded at the dedup step, logged as `duplicate_ignored`, never reprocessed.
+- **Failed processing after persistence** → event stays in `webhook_events` with `status = failed`, `retry_count` incremented, and is retried by a worker with exponential backoff — this makes the event recoverable **without needing the gateway to resend it**, exactly as required.
+- **Dead-letter queue**: after N failed retries, event moves to a dead-letter state and raises an alert for manual review — never silently dropped.
+- Raw payload storage is mandatory (even after normalization) — it is the only way to debug a mis-mapped field months later.
+
+---
+
+### SECTION 9 — Tracking Architecture
+
+- First-party `trackroi_click_id` generated **server-side or first-party JS** on landing, stored in a first-party cookie (not third-party) and persisted to the `clicks` table immediately, along with every UTM, `fbclid`, referrer, landing page, and timestamp available at that moment.
+- On checkout initiation, the click identifier (and full parameter set as fallback) is passed through to Perfect Pay's checkout, so the payment event can be joined back.
+- Explicit handling for degraded cases:
+  - Missing UTMs → session still tracked, attributed as "direct/unknown" rather than guessed.
+  - Only `fbclid` present → treat as a valid paid-Meta signal even without UTMs.
+  - Cookie/storage unavailable (ITP, private browsing, blockers) → this is a **known, permanent limitation**, not a bug to "fix" — the system should flag these sessions as "untrackable" rather than fabricate attribution.
+  - Cross-device / return visits → last-touch-within-attribution-window logic, with the window explicitly configurable, not hardcoded.
+
+---
+
+### SECTION 10 — Attribution Architecture
+
+- Default model: **Last Paid Click**, exactly as specified.
+- Attribution stored as an explicit row in `attribution_records`, linking `click_id` → `sale_id`, with the model name recorded — this is what makes multiple future models (first-click, linear, time-decay) additive rather than a rewrite.
+- Attribution conflicts (e.g., two plausible clicks for one sale) are resolved by a deterministic, documented tie-break rule (most recent click within the attribution window wins) — never a silent random choice.
+- No attribution found → the sale is still recorded and shown in the Vendas table, just flagged as "unattributed" in reporting rather than excluded — financial totals must always reconcile to 100% of sales regardless of attribution success.
+
+---
+
+### SECTION 11 — Metric Engine
+
+Single backend/domain-layer module owns every formula. Representative definitions (all must guard divide-by-zero and return `null`/"—" in the UI, never `NaN`/`Infinity`):
+
+- `ROAS = revenue / spend`
+- `ROI = (revenue - spend) / spend`
+- `CPA = spend / approved_sales`
+- `CPC = spend / clicks`
+- `CVR = approved_sales / clicks`
+- `Break-even ROAS = 1 / contribution_margin_percent`
+- `Break-even CPA = price × contribution_margin_percent`
+
+Gross vs. net revenue, contribution margin, and operational profit are computed from the configurable cost stack (gateway fees, taxes, commissions, fulfillment, operational cost) defined in Section on Break-even — never inferred.
+
+Distinct calculation modes, each with its own formula subset per the brief: **recurring/subscription** (MRR, ARR, churn, LTV:CAC), **one-to-one/X1** (cost per lead, per qualified lead, per sale), **broadcast/messaging** (delivered/opened/clicked/replied → CPA/ROAS), **direct-response** (the full paid-traffic funnel). Product type determines which mode applies — never assumed globally.
+
+---
+
+### SECTION 12 — Real-Time Architecture
+
+- New webhook processed → metric snapshot updated → event pushed to connected dashboard clients via WebSocket/SSE.
+- New Meta spend synced → same pattern.
+- Frontend subscribes to relevant channels (organization-scoped) and patches only the affected cards/tables — no full reload, no fake polling timers pretending to be real-time.
+
+---
+
+### SECTION 13 — Security Architecture
+
+- RBAC with explicit roles/permissions tables, enforced server-side on every request (never trust frontend role state).
+- Meta tokens and Perfect Pay secrets encrypted at rest, decrypted only in-process server-side, never returned in any API response, never in frontend bundles or env vars exposed to the client.
+- Webhook endpoint: signature/shape verification (per current Perfect Pay documentation) before any processing; rate-limited; not authenticated by session (it's machine-to-machine) but must reject anything that doesn't verify.
+- Standard app security: input validation, output encoding, parameterized queries (ORM), CSRF protection on session-based routes, secure headers, audit log of sensitive actions (role changes, integration reconnects, settings changes).
+
+---
+
+### SECTION 14 — Failure Scenarios (non-exhaustive, representative)
+
+| Scenario | Handling |
+|---|---|
+| Perfect Pay webhook delivered twice | Idempotency key discards the duplicate; logged, not alerted. |
+| Perfect Pay webhook never arrives | Reconciliation job detects the gap against the API (if available) and backfills; if no API exists, flagged for manual review. |
+| Meta API rate-limited mid-sync | Job backs off exponentially, resumes from last successful checkpoint — never restarts from zero. |
+| Meta token expires | Connections page shows "reconnect required" status immediately; sync jobs pause (not silently fail) until reconnected. |
+| Click has no attribution match at sale time | Sale still recorded; shown as unattributed; total revenue unaffected. |
+| Two webhooks arrive out of order (approved before pending) | `sale_events` is append-only and status is resolved by event timestamp + defined precedence, not arrival order. |
+| Refund arrives for an unknown transaction | Persisted as an orphan event, flagged for manual reconciliation, never silently dropped. |
+
+---
+
+### SECTION 15 — Testing Strategy
+
+Mandatory coverage areas per the brief: unit tests for every metric formula (including zero-denominator cases), integration tests for the full webhook pipeline (including duplicate-delivery and out-of-order scenarios), Meta sync tests against mocked paginated responses, attribution tests covering each degraded-case scenario in Section 9, authentication/authorization tests per role, and end-to-end tests for the critical path (click → checkout → webhook → dashboard update). Financial calculations and webhook idempotency are the two areas requiring the deepest coverage — both are named explicitly in the brief as non-negotiable.
+
+---
+
+### SECTION 16 — Deployment Architecture
+
+Standard containerized deployment (API, worker, and frontend as separate deployable units sharing one Postgres + one Redis), environment-based secrets injection (never committed), migrations run explicitly (not auto-applied on boot in production), background workers scaled independently from the API for sync-heavy periods.
+
+---
+
+### SECTION 17 — Risks and Limitations (explicit, permanent)
+
+- Browser-side tracking will always miss some fraction of sessions (ITP, ad-blockers, privacy modes) — this is an industry-wide limitation, not something TrackROI can engineer away.
+- Meta's own reported conversions will never perfectly match TrackROI's first-party attribution — both should be shown, clearly labeled, never merged into a false single number.
+- Any reconciliation logic against Perfect Pay is only as good as the read endpoints Perfect Pay currently exposes — if none exist, the system's only recovery mechanism is the dead-letter/retry pipeline, not true reconciliation.
+
+---
+
+### SECTION 18 — Production-Readiness Checklist
+
+- [ ] Duplicate webhook delivery cannot create a duplicate sale (tested)
+- [ ] Meta re-sync cannot double-count spend (tested)
+- [ ] All financial formulas covered by deterministic unit tests
+- [ ] No secret/token ever reachable from frontend code or network tab
+- [ ] Every webhook failure is retried or dead-lettered — never silently dropped
+- [ ] Attribution failure never excludes a sale from revenue totals
+- [ ] Dashboard updates via real event-driven push, not fake timers
+- [ ] RBAC enforced server-side on every route
+- [ ] i18n complete for PT/EN/ES, PT default
+- [ ] Dark Hybrid default theme, Light theme fully functional, preference persisted
+- [ ] No emojis, pill buttons, icon-only buttons, or glassmorphism in the shipped UI
+
+---
+
+### SECTION 19 — Final Recommended Architecture (summary)
+
+Modular monolith (TypeScript/NestJS or Python/FastAPI) + PostgreSQL + Redis-backed job queue + WebSocket push, with a hardened, minimal-logic webhook ingestion endpoint feeding an asynchronous, idempotent processing pipeline; a single backend-owned metric engine; explicit attribution records as first-class rows (not implicit joins); and a design system that deliberately rejects default "AI SaaS" visual patterns in favor of a restrained, data-serious interface.
+
+---
+
+## MASTER PROMPT FOR TRACKROI
+
+*(Copy everything below into Claude Code / Claude Sonnet / Claude Opus as the build specification.)*
+
+```
+You are building TrackROI, a private, internal marketing-attribution and
+performance-analytics SaaS. Do not start writing code before completing
+Step 1 below.
+
+STEP 1 — INSPECT BEFORE CHANGING ANYTHING
+Inspect the current repository (if one exists). Identify the existing
+stack, folder structure, database, and any existing auth system. Do not
+assume a greenfield project. If the repo is empty, use: TypeScript +
+NestJS (or FastAPI/Python) backend, PostgreSQL, Redis-backed job queue
+(BullMQ or Celery), React + TypeScript frontend, WebSocket/SSE for
+real-time push. State your stack decision explicitly before proceeding.
+
+PROJECT PURPOSE
+TrackROI tracks the complete relationship between: Ad → Click → Landing
+Page → Session → Checkout → Payment → Approved Sale → Revenue →
+Advertising Spend → Profitability → ROAS → ROI → Break-even. Initial
+integrations: Meta Ads / Facebook Business Manager (Marketing API) and
+Perfect Pay (payment gateway, webhook-first). The app is private/internal
+but must be built to production-grade standards: secure, reliable,
+observable, and extensible to future traffic sources and gateways.
+
+CRITICAL, NON-NEGOTIABLE PRINCIPLES
+1. Data integrity over visual polish. A beautiful dashboard with wrong
+   numbers is a failed implementation.
+2. The same webhook delivered multiple times must NEVER create more than
+   one sale. Enforce this with a database-level UNIQUE constraint on an
+   idempotency key (gateway + transaction_id + event_type), not just
+   application logic.
+3. Never invent API endpoints, webhook payload fields, Meta permissions,
+   or Perfect Pay authentication mechanisms. Before implementing any
+   external integration, verify the current official documentation for
+   Meta Marketing API and Perfect Pay. Where you cannot verify something
+   directly, explicitly comment in the code: "VERIFY AGAINST CURRENT
+   OFFICIAL DOCUMENTATION" and implement the safest, most defensive
+   assumption in the meantime.
+4. Never expose Meta access tokens, Perfect Pay secrets, or any API key
+   to the frontend, in client bundles, or in API responses. All secrets
+   live server-side, encrypted at rest.
+5. Never fabricate real-time behavior with timers. Real-time dashboard
+   updates must be event-driven, triggered by actual webhook processing
+   or sync completion.
+6. Never use mock/fake data as if it were production data anywhere in
+   the shipped application.
+
+DATABASE (PostgreSQL, normalized)
+Design and implement tables for at least: users, organizations, roles,
+permissions, products, product_costs, financial_settings, ad_accounts,
+campaigns, ad_sets, ads, advertising_spend, sessions, clicks,
+tracking_events, checkouts, sales, sale_events, refunds, chargebacks,
+integrations, webhook_events, webhook_attempts, synchronization_jobs,
+synchronization_logs, attribution_records, metric_snapshots, settings,
+audit_logs. Enforce UNIQUE constraints on: webhook_events idempotency
+key; advertising_spend(ad_account_id, entity_type, entity_id, date);
+sales gateway_transaction_id per gateway. sale_events is append-only
+(status history), never mutated in place. Add indexes appropriate for
+dashboard-scale reporting queries.
+
+AUTHENTICATION & AUTHORIZATION
+Implement session or JWT-with-refresh authentication, and a full RBAC
+system (roles, permissions, enforced server-side on every route — never
+trust client-provided role state). Build an audit log for sensitive
+actions (role changes, integration connect/disconnect, settings edits).
+
+WEBHOOK INFRASTRUCTURE (build this before the dashboard)
+Build a dedicated webhook ingestion endpoint for Perfect Pay that does
+the minimum work synchronously: verify signature/shape (per current
+Perfect Pay docs — mark as VERIFY if uncertain) → persist the raw
+payload with status "received" → enqueue a processing job → return 200
+immediately. All business logic — deduplication via idempotency key,
+normalization, attribution, and metric-snapshot updates — happens
+asynchronously in a worker. If processing fails after persistence, the
+event must remain recoverable via retry with exponential backoff, up to
+a dead-letter state after N attempts, without requiring Perfect Pay to
+resend anything. Store raw payloads permanently even after normalization
+for debuggability. Cover at minimum these Perfect Pay event types:
+approved, pending, rejected, cancelled, refunded, chargeback, and
+recurring/subscription events if applicable. Build an
+admin-facing webhook log viewer and a webhook test/replay interface.
+
+Also implement a reconciliation job against Perfect Pay's API (only if
+such a read/list endpoint currently exists per official docs) to detect
+and backfill missed or delayed webhooks, without ever creating duplicate
+sales — reconciliation must check existing gateway_transaction_id before
+any insert.
+
+META ADS INTEGRATION
+Implement OAuth/authorization per Meta's current official flow. Store
+tokens encrypted, server-side only. Implement token expiration detection
+and a clear "reconnect required" state in the Connections UI (do not
+silently fail). Build sync jobs for: initial historical backfill,
+scheduled incremental sync (re-pulling recent days to catch Meta's own
+late attribution revisions), and manual "sync now." Handle Meta's
+cursor-based pagination fully (follow paging.next to exhaustion). Handle
+rate limits with exponential backoff, respecting Meta's documented
+usage-tracking headers/mechanism (verify current mechanism against
+official docs). Pin to an explicit, currently-supported Meta API
+version. Sync ad_accounts, campaigns, ad_sets, ads, spend, impressions,
+reach, clicks, link clicks, CTR, CPC, CPM, frequency, and account
+currency. Never assume currency conversion — log and surface the ad
+account's native currency explicitly.
+
+FIRST-PARTY TRACKING & CLICK-ID SYSTEM
+Generate a unique, persistent trackroi_click_id per session (first-party
+cookie, not third-party). On every landing hit, persist to the clicks
+table: trackroi_click_id, fbclid, all UTM parameters, campaign_id,
+adset_id, ad_id, landing_page, referrer, timestamp. Pass the click
+identifier through to Perfect Pay's checkout (verify what Perfect Pay's
+checkout currently supports passing through) so the payment event can be
+joined back to the click. Handle degraded cases explicitly and without
+guessing: missing UTMs (attribute as direct/unknown), fbclid-only
+(treat as a valid paid-Meta signal), unavailable cookies/storage (mark
+session as untrackable rather than fabricating attribution), and
+return/cross-device visits (apply a configurable attribution window,
+not a hardcoded one).
+
+ATTRIBUTION ENGINE
+Implement Last Paid Click as the default attribution model, but store
+attribution as explicit rows in attribution_records (click_id, sale_id,
+model_name) so additional models (first-click, linear, time-decay) can
+be added later without restructuring. Resolve attribution conflicts with
+a documented, deterministic tie-break rule. A sale with no attribution
+match must still be recorded and included in total revenue — flagged as
+"unattributed," never excluded.
+
+METRIC ENGINE
+Implement one centralized, backend-owned metric calculation module —
+never duplicate formulas in the frontend. Implement at minimum: spend,
+gross/net revenue, approved/pending sales, refunds, chargebacks, CPA,
+CPC, CPM, CTR, CVR, ROAS, ROI, AOV, profit, margin, break-even ROAS,
+break-even CPA, break-even conversion rate, checkout rate,
+checkout-to-sale rate, click-to-sale rate, revenue/profit per click.
+Every formula must guard against zero denominators and return a null/em
+dash display value — never NaN or Infinity. Build a configurable
+break-even calculator (product price, gateway fees, taxes, affiliate
+commission, operational/fulfillment/variable/fixed costs) that clearly
+separates gross revenue, net revenue, contribution margin, and
+operational profit. Implement separate metric modes for: recurring/
+subscription products (MRR, ARR, churn, retention, LTV:CAC, payback
+period), one-to-one/X1 sales (leads, qualified leads, cost per lead/
+sale, revenue/sales per operator — architected for future CRM
+integration), broadcast/messaging campaigns (delivered/opened/clicked/
+replied → CPA/ROAS, provider-agnostic), and direct-response paid traffic
+(the full funnel from spend to profit). Metric mode is determined by
+product type, never assumed globally.
+
+DASHBOARD & REAL-TIME
+Build a real-time main dashboard (balance/spend/revenue/profit/ROAS/ROI/
+CPA/sales/checkouts/CVR/break-even status) with filters (date range,
+product, user, source, campaign, ad set, ad, gateway, sale status),
+performance cards, charts, campaign and sales tables, funnel
+visualization, and period-over-period comparison. Updates must arrive
+via WebSocket/SSE triggered by actual webhook processing or sync
+completion — read from precomputed metric_snapshots, not raw-event
+recalculation on every request, and never a full page reload.
+
+NAVIGATION & SETTINGS
+Sidebar sections: Dashboard, Campanhas, Anúncios, Vendas, Funil,
+Métricas, Produtos, Ferramentas, Conexões, Configurações. Connections
+section supports only Meta Ads and Perfect Pay initially — no fake or
+placeholder integrations — but must be architected so a third gateway
+or traffic source can be added without a rewrite. Meta connection view
+shows: status, connected account, ad accounts, last sync, token status,
+errors, reconnect/disconnect. Perfect Pay connection view shows:
+connection status, webhook status, API status, last received event,
+failed events, retry status, plus an admin webhook test/replay tool.
+Settings must cover: General, Account, Users, Roles, Permissions,
+Products, Financial settings, Currency, Timezone, Attribution,
+Tracking, Webhooks, Integrations, Notifications, Appearance, Language,
+Security, Logs, Data management — all persisted server-side, no
+hardcoded business logic.
+
+INTERNATIONALIZATION & THEMES
+Support Portuguese (default), English, and Spanish, with a proper
+translation architecture (no hardcoded user-facing strings). Support
+two themes — Dark Hybrid (default) and Light — switchable in settings,
+with the preference persisted per user.
+
+DESIGN SYSTEM (strict)
+Minimalistic, modern, professional, premium, data-oriented, responsive,
+fast, clean. Strong visual hierarchy, generous whitespace, highly
+readable tables, clean informative charts, visually restrained cards.
+Moderate border radius (not pill-shaped buttons). Buttons use clear
+text labels only — no icons or symbols inside buttons; icons are
+reserved for navigation/information architecture where they genuinely
+aid usability. Explicitly forbidden: emojis, pill-shaped buttons,
+excessive rounded containers, excessive gradients, neon aesthetics,
+excessive glassmorphism, floating decorative elements, icon-only
+buttons, oversized buttons/typography, childish illustrations, generic
+"AI dashboard" look, excessive shadows, visual clutter, unnecessary
+animation. The interface should read as a serious analytics/fintech
+platform, not a templated AI-generated SaaS demo.
+
+SECURITY
+Implement RBAC enforced server-side on every route, secure session/JWT
+handling, password security, CSRF protection where applicable, rate
+limiting, full input validation and output encoding, parameterized
+queries throughout (no raw SQL string interpolation), secure headers,
+webhook signature/shape verification, and audit logging of sensitive
+actions. No secret, token, or credential may ever be reachable from
+frontend code, client bundles, or API responses.
+
+OBSERVABILITY
+Implement structured logging with request IDs, event IDs, transaction
+IDs, timestamps, source, severity, and processing status, sufficient
+for an administrator to answer: what happened, when, from which
+integration/event, was it processed successfully, did it fail and why,
+was it retried, how many times, was it eventually recovered. Build an
+admin-facing integration/webhook log viewer.
+
+ERROR HANDLING
+Distinguish explicitly between temporary failure, permanent failure,
+authentication failure, validation failure, rate limit, timeout,
+malformed payload, duplicate event, unknown event, missing attribution,
+and database failure. Never silently discard an event or silently
+ignore a failed sync — always surface an actionable state to
+administrators.
+
+TESTING
+Implement unit tests for every metric formula (including zero-
+denominator edge cases), integration tests for the full webhook
+pipeline (including duplicate-delivery and out-of-order-event
+scenarios), Meta sync tests against paginated mock responses,
+attribution tests for every degraded-tracking scenario, RBAC/auth
+tests, and end-to-end tests for the critical path: click → checkout →
+webhook → dashboard update. Financial calculations and webhook
+idempotency require the deepest test coverage in the entire system —
+treat these as non-negotiable, not optional polish.
+
+IMPLEMENTATION ORDER
+1. Architecture document (confirm/adjust the stack decision from Step 1)
+2. Database schema and migrations
+3. Authentication and RBAC
+4. Backend foundation (domain layer, API structure)
+5. Webhook infrastructure (ingestion, dedup, retry, dead-letter)
+6. Perfect Pay integration (webhook mapping, reconciliation)
+7. First-party tracking infrastructure and click-id system
+8. Attribution engine
+9. Meta Ads integration (OAuth, sync jobs, pagination, rate-limit
+   handling)
+10. Metric engine (all modes)
+11. Real-time dashboard
+12. Settings system
+13. Internationalization (PT default, EN, ES)
+14. Themes (Dark Hybrid default, Light)
+15. Logging and observability, including admin log/webhook viewers
+16. Automated test suite across all layers above
+17. Security audit pass — confirm no secret exposure, RBAC gaps, or
+    injection vectors
+18. Integration audit pass — confirm no assumed/undocumented API
+    behavior remains uncommented as VERIFY
+19. Financial-calculation audit pass — confirm every formula against
+    Section 11/Break-even definitions, confirm no NaN/Infinity paths
+20. UX/UI audit pass — confirm compliance with the design system and
+    negative-prompt constraints above
+21. Fix all issues found in the audit passes
+22. Run the full test suite
+23. Only then declare the implementation complete — do not consider a
+    rendering UI sufficient for "done."
+
+Do not proceed past Step 1 without stating your stack decision. Do not
+implement any Meta or Perfect Pay endpoint, field, or auth mechanism you
+have not verified or explicitly marked as requiring verification. Data
+integrity and reliable attribution take priority over visual polish or
+implementation speed at every decision point in this build.
+```

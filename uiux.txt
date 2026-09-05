@@ -1,0 +1,82 @@
+Focus exclusively on this task: UI/UX and color system for the dashboard.
+Do not touch backend logic, integrations, or data pipeline right now —
+this is purely a visual/design system task.
+
+REFERENCE
+I'm attaching a reference dashboard screenshot (a UTMify-style analytics
+dashboard). Match its LAYOUT STRUCTURE closely — the sidebar, the
+top-bar summary, the grid of stat cards (taxes, refund rate, additional
+expenses, sales tax, chargeback rate, ad-platform tax), the "Vendas por
+Pagamento" donut breakdown, the "Vendas por Fonte" panel, the "Taxa de
+Aprovação" breakdown by payment method, and the full-width conversion
+funnel at the bottom — as the structural blueprint. Rebuild this
+structure for TrackROI, but the COLOR PALETTE must be completely
+different from the reference (the reference uses blue/purple — do not
+reuse that).
+
+1) COLOR SYSTEM (strict — apply everywhere in the app, not just this
+   dashboard)
+   - Base palette: black / near-black backgrounds, white as the primary
+     text and number color everywhere by default.
+   - Green is reserved EXCLUSIVELY for positive financial values: profit,
+     positive ROI, approved revenue growth, gains. Never used decoratively.
+   - Red is reserved EXCLUSIVELY for negative financial values: negative
+     balance, loss, negative ROI, refunds/chargebacks shown as a cost.
+     Never used decoratively.
+   - No other accent colors for numbers or key metric text. Borders,
+     dividers, and inactive UI chrome can use neutral greys, but data
+     values follow the white/green/red rule with no exceptions.
+   - Apply this rule consistently across every card, table, and chart
+     label in the app — a metric's color must always be determined by
+     its sign/meaning, never by its position on the page.
+
+2) CONVERSION FUNNEL CHART
+   Rebuild as a continuous, smoothly-tapering funnel shape (like the
+   reference's flowing silhouette, not discrete bars), with 5 stages in
+   this order:
+     Cliques → Vis. Página → ICs (Iniciar Checkout) → Vendas Inic. →
+     Vendas Apr.
+   Each stage shows: raw count below the shape, and conversion
+   percentage relative to the FIRST stage displayed inside the shape at
+   that stage's width (as in the reference).
+   Color: a glowing/incandescent gradient that transitions from PURPLE
+   at the widest (Cliques) end to RED at the narrowest (Vendas Apr.) end
+   — the funnel is the one place in the UI where this purple-to-red
+   gradient is used; it does not apply anywhere else in the app.
+
+   DATA SOURCE — must be real, not fabricated:
+   This funnel must render actual counts pulled from the real
+   click/session/checkout/sale tables — never sample or placeholder
+   numbers. It must be filterable by traffic source (the reference shows
+   an "all" / per-source view). Add a "Tráfego Direto" segment: when
+   filtered to direct traffic, the funnel shows TrackROI's own
+   first-party tracked events (clicks/page-views/checkouts/sales) for
+   sessions with no ad platform attribution — do not substitute Meta
+   data here, since Meta has no visibility into direct traffic. When
+   filtered to Meta as the source, reconcile click counts against what
+   Meta's API actually reports for that account/campaign and clearly
+   label the numbers as coming from Meta where they do.
+
+3) DASHBOARD CUSTOMIZATION
+   The main dashboard must be user-customizable: allow the user to
+   show/hide individual cards and charts, and reorder/resize them
+   (drag-and-drop grid). Persist each user's layout choice server-side
+   so it's restored on next login — this is a per-user setting, not
+   global.
+
+4) ALIGNMENT AND MINIMALISM (this was broken before — verify it's
+   actually fixed this time)
+   - Every stat card in a row must share identical height, padding, and
+     number/label font size — no exceptions, no card allowed to be
+     taller or wider than its row siblings due to content overflow.
+   - Numbers must never wrap or clip; size the card to fit the largest
+     realistic value (e.g. "R$ 999.999,99") rather than the current
+     sample value.
+   - No decorative elements, no icons crammed next to numbers unless
+     they carry real meaning (e.g. a small up/down indicator tied to
+     period-over-period change — and even that follows the green/red
+     rule above).
+
+Before writing any code, confirm you understand: white is default,
+green/red are reserved strictly for profit/loss meaning, and the
+purple-to-red gradient is funnel-only. Then implement.

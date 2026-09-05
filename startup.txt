@@ -1,0 +1,56 @@
+Focus exclusively on this task. Do not touch dashboard UI, metrics, or
+integration logic right now — this is purely a project structure and
+local dev tooling task.
+
+TASK: Split the project into separate frontend and backend folders, and
+create a one-click local startup script.
+
+1) REPOSITORY STRUCTURE
+Reorganize the repository (moving existing code, not duplicating it) into:
+
+  /backend    → the entire API/server codebase
+  /frontend   → the entire client/UI codebase
+
+Each folder must be self-contained with its own package.json, its own
+dependencies, and its own env file (.env for backend, .env for frontend
+if needed). Do not leave backend and frontend code mixed at the root.
+Update all import paths, scripts, and configs affected by the move.
+Confirm both apps still run correctly after the move before proceeding.
+
+2) BACKEND PORT
+Backend must run on a fixed, explicit port (e.g. 4000 — pick one and use
+it consistently in backend config and in the startup script below). Do
+not use a random/auto-assigned port.
+
+3) STARTUP SCRIPT — startup.bat AT THE REPO ROOT
+Create a Windows batch file, startup.bat, placed at the root of the
+repository, that when double-clicked does the following:
+
+  a. Resolves the repo root correctly regardless of where it's launched
+     from (use %~dp0 as the base path — do not assume a fixed absolute
+     path).
+  b. Opens a NEW, separate cmd window that cd's into /backend and starts
+     the backend dev server (e.g. npm run dev / npm start — use whatever
+     script actually starts this backend). This window must stay open
+     and the process must keep running for the entire session — do not
+     let the window close automatically when the command finishes
+     starting up (use `start "Backend" cmd /k "cd /d %~dp0backend && npm run dev"`
+     or the equivalent for whatever the backend's actual start command
+     is).
+  c. Opens a SECOND separate cmd window the same way for /frontend,
+     starting its dev server and keeping that window open for the
+     session too.
+  d. Waits a few seconds (enough for the frontend dev server to be
+     ready — a simple timeout is fine) and then automatically opens the
+     default web browser at the frontend's local URL
+     (http://localhost:<frontend-port>) using the `start` command.
+  e. The main startup.bat window itself can close after launching the
+     two child windows and opening the browser — it does not need to
+     stay open, only the backend and frontend windows do.
+
+Test that double-clicking startup.bat from the repo root reliably starts
+both servers in their own persistent windows and opens the working app
+in the browser, with no manual steps required.
+
+Report back once this works end-to-end, before moving on to anything
+else.

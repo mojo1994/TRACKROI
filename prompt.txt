@@ -1,0 +1,18 @@
+echo ============================================
+echo  TrackROI - Liberando portas e iniciando
+echo ============================================
+
+taskkill /F /FI "WINDOWTITLE eq TrackROI Backend" 2>nul
+taskkill /F /FI "WINDOWTITLE eq TrackROI Frontend" 2>nul
+
+echo Iniciando Backend (porta 4100)...
+start "TrackROI Backend" cmd /k "cd /d "%~dp0backend" && npm run dev"
+
+echo Iniciando Frontend (porta 5180)...
+start "TrackROI Frontend" cmd /k "cd /d "%~dp0frontend" && npm run dev"
+
+echo.
+echo Backend:  http://localhost:4100
+echo Frontend: http://localhost:5180
+echo.
+pause

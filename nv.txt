@@ -1,0 +1,68 @@
+The current dashboard has two serious problems that must be fixed before this
+is considered usable. Do not add more mock data or placeholder polish — fix
+the underlying issues.
+
+1) DASHBOARD LAYOUT — CURRENTLY BROKEN
+The metric cards are visually cluttered and misaligned (numbers wrapping
+inconsistently, "R$ 1.121,00" clipped, uneven card heights, inconsistent
+number sizing between cards). Rebuild the card grid with:
+- A fixed, consistent card height and identical internal padding across
+  every card in the row.
+- Right-aligned or left-aligned numbers consistently (pick one, apply to
+  all cards) — never centered-by-accident from overflow.
+- One consistent font size/weight for the metric value across all cards,
+  and one consistent smaller size/weight for the label above it.
+- Currency values must never clip or wrap — size the card to the content,
+  not the content to the card.
+- Reduce the metric row to what actually fits cleanly; if there isn't room
+  for 6 cards at readable size, use 2 rows of clearly-grouped cards
+  (e.g. row 1: Investimento, Receita, Lucro | row 2: ROAS, ROI, CPA), not
+  one cramped row.
+
+2) CONVERSION FUNNEL — REBUILD AS A GLOWING 4-STAGE FUNNEL CHART
+Replace the current funnel with a proper visual funnel (tapering bars, not
+a plain list), 4 stages exactly, in this order:
+1. Cliques
+2. Visita à Página (landing page view)
+3. Iniciar Checkout (IC)
+4. Venda Aprovada
+
+Each stage bar should have a soft glow/incandescent effect (a subtle outer
+glow in the bar's accent color — cyan/green tones consistent with the
+Dark Hybrid theme already in use, NOT a rainbow or neon overload), with the
+bar width proportional to volume at that stage, the count on the right,
+and the conversion percentage relative to the previous stage shown below
+each bar. No emojis, no icons inside the bars.
+
+3) NO PLACEHOLDER DATA — THIS MUST BE A REAL, FUNCTIONAL SYSTEM
+Every number currently on screen is fabricated. Remove all seeded/sample
+data (fake sales, fake product names, fake revenue figures) from every
+page — Dashboard, Vendas, Funil, Métricas, Produtos. The dashboard must
+render an honest empty state (zeros, "Nenhum dado ainda", no chart) when
+there is no real data connected — never synthetic numbers standing in for
+real ones.
+
+Then wire up the two real integrations:
+
+a) Meta Business Manager (Meta Ads)
+Connect via the platform's real Meta/Facebook connector using my actual
+Meta Business Manager account. Pull real ad account, campaign, and spend
+data — do not simulate this. If the connector requires a plan upgrade to
+authorize OAuth, tell me exactly what's blocking it before building
+anything else around it.
+
+b) Perfect Pay — real webhook integration
+Set up a real, externally reachable webhook endpoint that Perfect Pay can
+call on payment events (approved, pending, refunded, chargeback,
+cancelled). Confirm what's needed on this platform to expose a public
+webhook URL (custom code/function support, environment variables for a
+webhook secret, etc.) and tell me explicitly what to configure on the
+Perfect Pay side (the exact URL to register) once it's ready. Persist the
+raw webhook payload, deduplicate by transaction ID + event type so a
+repeated webhook never creates a duplicate sale, and only then does a real
+sale appear in Vendas/Dashboard.
+
+Do not proceed with more visual polish until you've confirmed: (1) what
+this platform actually supports for outbound OAuth to Meta and inbound
+webhooks from Perfect Pay, and (2) that all fabricated data has been
+removed. Report back on both before continuing.

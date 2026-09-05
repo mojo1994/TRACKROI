@@ -503,6 +503,117 @@ function listPublicIntegrations() {
   return providers.list().map((provider) => publicIntegration(provider));
 }
 
+async function handleMetaSync(req, res, user) {
+  const provider = providers.get("meta");
+  const integration = db.getIntegration("meta");
+  const token = integration?.accessToken ? decryptSecret(integration.accessToken) : null;
+  if (!token) {
+    send(res, 400, { ok: false, error: "Meta Ads não está conectado. Conecte sua conta do Facebook primeiro." }, {}, req);
+    return;
+  }
+
+  let accounts;
+  try {
+    accounts = await provider.listAdAccounts(token);
+  } catch (error) {
+    logger.error("Meta ad accounts list failed", { error: error.message });
+    send(res, 502, { ok: false, error: friendlyProviderError("meta", error), retryable: true }, {}, req);
+    return;
+  }
+  if (!accounts.length) {
+    send(res, 400, { ok: false, error: "Nenhuma conta de anúncio ativa encontrada na sua conta do Facebook." }, {}, req);
+    return;
+  }
+
+  const storedId = String(integration?.adAccountId || "").trim().replace(/^act_/, "");
+  const selected = accounts.find((a) => String(a.accountId) === storedId) || accounts[0];
+  const since = integration?.lastSyncAt
+    ? new Date(new Date(integration.lastSyncAt).getTime() - 12 * 3600000).toISOString().slice(0, 10)
+    : new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const until = new Date().toISOString().slice(0, 10);
+
+  let daily;
+  try {
+    daily = await provider.fetchDailyInsights(token, selected.id, { since, until });
+  } catch (error) {
+    logger.error("Meta insights sync failed", { error: error.message });
+    send(res, 502, { ok: false, error: friendlyProviderError("meta", error), retryable: true }, {}, req);
+    return;
+  }
+
+  let importedSpend = 0;
+  let importedClicks = 0;
+  const dateTags = new Set();
+  for (const row of daily) {
+    if (!row.date) continue;
+    dateTags.add(row.date);
+    importedSpend += row.spendCents || 0;
+    importedClicks += row.clicks || 0;
+  }
+
+  try {
+    db.transaction(() => {
+      for (const row of daily) {
+        if (!row.date) continue;
+        if (row.spendCents > 0) {
+          db.run("DELETE FROM advertising_spend WHERE source = 'meta' AND substr(created_at, 1, 10) = ?", [row.date]);
+          db.insertSpend({
+            id: `meta-sp-${row.date}`,
+            source: "meta",
+            amountCents: row.spendCents,
+            currency: selected.currency || "BRL",
+            createdAt: `${row.date}T00:00:00Z`,
+          });
+        }
+        if (row.clicks > 0) {
+          db.run("DELETE FROM clicks WHERE source = 'meta' AND substr(created_at, 1, 10) = ?", [row.date]);
+          db.insertClick({
+            id: `meta-cl-${row.date}`,
+            source: "meta",
+            quantity: row.clicks,
+            createdAt: `${row.date}T00:00:00Z`,
+          });
+        }
+      }
+    });
+  } catch (error) {
+    logger.error("Meta sync write failed", { error: error.message });
+    send(res, 500, { ok: false, error: "Falha ao gravar os dados sincronizados." }, {}, req);
+    return;
+  }
+
+  db.upsertIntegration("meta", {
+    ...integration,
+    status: "connected",
+    connected: true,
+    connectedAccount: selected.name,
+    adAccountId: selected.accountId,
+    lastSyncAt: new Date().toISOString(),
+    importsCount: (Number(integration?.importsCount) || 0) + 1,
+    errors: [],
+  });
+  db.insertImportRun({
+    type: "meta_sync",
+    filename: "Sincronização automática Meta",
+    totalRows: daily.length,
+    importedSpend,
+    importedClicks,
+    spendCents: importedSpend,
+    clicks: importedClicks,
+    campaigns: dateTags.size,
+    createdBy: user?.id || null,
+  });
+  db.appendAuditLog({
+    actorUserId: user?.id || null,
+    action: "integration.meta.sync",
+    resourceType: "integration",
+    resourceId: "meta",
+    metadata: { account: selected.name, days: dateTags.size },
+  });
+  broadcastSSE({ type: "data", changed: ["integrations", "dashboard", "metrics", "funnel", "sales"] });
+  send(res, 200, { ok: true, account: selected.name, days: dateTags.size, spendCents: importedSpend, clicks: importedClicks }, {}, req);
+}
+
 async function handleIntegrationHealth(req, res, match) {
   const provider = providers.get(match[1]);
   if (!provider) {
@@ -1222,6 +1333,11 @@ async function main() {
 
       if (req.method === "GET" && pathname === "/api/imports") {
         await handleListImportRuns(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/integrations/meta/sync") {
+        await handleMetaSync(req, res, auth.user);
         return;
       }
 

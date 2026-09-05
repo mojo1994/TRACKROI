@@ -422,12 +422,6 @@ async function connectProvider(providerId, button) {
 async function testProvider(providerId, button) {
   setButtonLoading(button, "Verificando…");
   try {
-    if (providerId === "meta") {
-      await apiFetch("/api/imports");
-      setButtonLoading(button, "");
-      showConnectMessage(providerId, "Servidor pronto para importações.", "success");
-      return;
-    }
     const health = await apiFetch(`/api/integrations/${providerId}/health`);
     setButtonLoading(button, "");
     if (health.configured) {
@@ -438,6 +432,21 @@ async function testProvider(providerId, button) {
   } catch (error) {
     setButtonLoading(button, "");
     showConnectMessage(providerId, friendlyError(error), "error");
+  }
+}
+
+async function syncProvider(providerId, button) {
+  setButtonLoading(button, "Sincronizando…");
+  try {
+    const result = await apiFetch(`/api/integrations/${providerId}/sync`, { method: "POST", body: "{}" });
+    setButtonLoading(button, "");
+    const days = Number(result.days || 0);
+    showConnectMessage(providerId, `Sincronizado ${days} ${days === 1 ? "dia" : "dias"} de ${escapeHtml(result.account || "sua conta")}. Dashboard atualizado.`, "success");
+    await loadData("connections", { silent: true });
+  } catch (error) {
+    setButtonLoading(button, "");
+    showConnectMessage(providerId, friendlyError(error), "error");
+    await loadData("connections", { silent: true });
   }
 }
 
@@ -1059,19 +1068,25 @@ function connectionCard(item) {
   const status = connected || item.status === "connected" ? "connected" : item.status || "not_connected";
   const notConfigured = item.configured === false;
   const isMeta = item.id === "meta";
-  const actions = isMeta
-    ? ""
-    : `
-      ${notConfigured
-        ? `<span class="ghost" disabled>Configuração pendente</span>`
-        : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : "Conectar"}</button>`}
+  const connectAction = notConfigured
+    ? `<span class="ghost" disabled>Configuração pendente</span>`
+    : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : isMeta ? "Conectar Meta Ads" : "Conectar"}</button>`;
+  const actions = `
+      ${connectAction}
+      ${isMeta && connected ? `<button type="button" class="ghost" data-sync-button="${escapeHtml(item.id)}">Sincronizar agora</button>` : ""}
       <button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar conexão</button>
     `;
   const body = isMeta
     ? `
-      ${connected ? connectedSummaryHtml(item) : ""}
-      ${connected ? "" : `<div class="connection-line">Exporte seus dados como arquivo CSV e importe para atualizar o funil, as métricas, vendas e o ROI.</div>`}
-      ${importPanelHtml(item)}
+      ${connected
+        ? connectedSummaryHtml(item)
+        : `<div class="connection-line">Conecte sua conta do Facebook em um clique para importar gastos, cliques e campanhas dos seus anúncios automaticamente.</div>`}
+      <div class="connection-message" data-connect-message="${escapeHtml(item.id)}" hidden></div>
+      <div class="connection-actions">${actions}</div>
+      <details class="import-fallback">
+        <summary><span class="advanced-title">Importar arquivo CSV manualmente</span><span class="advanced-caret"></span></summary>
+        ${importPanelHtml(item)}
+      </details>
     `
     : `
       ${connected
@@ -1176,7 +1191,7 @@ function connectionsPage(data) {
     <section class="connections-hero">
       <div class="connections-hero-copy">
         <h3>Atualize seus dados</h3>
-        <p>Importe as planilhas exportadas do Gerenciador de Anúncios. O TrackROI identifica o gasto, os cliques, as campanhas e as vendas — e atualiza o funil, as métricas e o ROI.</p>
+        <p>Conecte sua conta do Facebook em um clique para importar gastos, cliques e campanhas dos seus anúncios automaticamente — ou importe planilhas exportadas do Gerenciador de Anúncios. O TrackROI atualiza o funil, as métricas e o ROI.</p>
       </div>
       <div class="connections-progress">
         <div class="progress-steps">
@@ -1665,6 +1680,9 @@ function attachPageHandlers() {
   });
   document.querySelectorAll("[data-test-button]").forEach((button) => {
     button.onclick = () => testProvider(button.dataset.testButton, button);
+  });
+  document.querySelectorAll("[data-sync-button]").forEach((button) => {
+    button.onclick = () => syncProvider(button.dataset.syncButton, button);
   });
 
   const productForm = el("product-form");

@@ -57,10 +57,24 @@ function readRawBody(req) {
   });
 }
 
-function readRawBodyBuffer(req) {
+function readRawBodyBuffer(req, maxBytes = 0) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (maxBytes && total > maxBytes) {
+        req.removeAllListeners("data");
+        req.removeAllListeners("end");
+        req.removeAllListeners("error");
+        req.destroy();
+        const error = new Error("Arquivo muito grande. O limite é de 30 MB — exporte um período menor.");
+        error.payloadTooLarge = true;
+        reject(error);
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
@@ -545,9 +559,9 @@ async function handleImportCsv(req, res, user) {
   }
   let raw;
   try {
-    raw = await readRawBodyBuffer(req);
-  } catch {
-    send(res, 400, { ok: false, error: "Não foi possível ler o arquivo enviado." }, {}, req);
+    raw = await readRawBodyBuffer(req, 30 * 1024 * 1024);
+  } catch (error) {
+    send(res, error.payloadTooLarge ? 413 : 400, { ok: false, error: error.message }, {}, req);
     return;
   }
   const { files, fields } = parseMultipart(raw, String(req.headers["content-type"] || ""));

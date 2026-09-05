@@ -258,7 +258,7 @@ function importCsv(content) {
     if (transformed.amountSpentCents > 0) {
       const createdAt = transformed.dateStart || new Date().toISOString();
       spendRecords.push({
-        id: `sp_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+        id: `sp_${nowBase}_${crypto.randomBytes(4).toString("hex")}`,
         source: "meta",
         amountCents: transformed.amountSpentCents,
         currency: "BRL",
@@ -266,22 +266,21 @@ function importCsv(content) {
       });
       totalSpendCents += transformed.amountSpentCents;
     }
-    if (transformed.linkClicks > 0 || transformed.impressions > 0) {
+    if (transformed.linkClicks > 0) {
       const createdAt = transformed.dateStart || new Date().toISOString();
-      for (let i = 0; i < Math.max(transformed.linkClicks, 1); i++) {
-        clicksRecords.push({
-          id: `cl_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
-          trackroiClickId: `trk_${crypto.randomBytes(6).toString("hex")}`,
-          source: "meta",
-          campaignId: transformed.campaignName || null,
-          adsetId: transformed.adName || null,
-          adId: null,
-          landingPage: "/",
-          referrer: null,
-          fbclid: null,
-          createdAt,
-        });
-      }
+      clicksRecords.push({
+        id: `cl_${nowBase}_${crypto.randomBytes(4).toString("hex")}`,
+        trackroiClickId: `trk_${crypto.randomBytes(6).toString("hex")}`,
+        source: "meta",
+        campaignId: transformed.campaignName || null,
+        adsetId: transformed.adName || null,
+        adId: null,
+        landingPage: "/",
+        referrer: null,
+        fbclid: null,
+        quantity: transformed.linkClicks,
+        createdAt,
+      });
       totalClicks += transformed.linkClicks;
       totalImpressions += transformed.impressions;
       totalReach += transformed.reach;
@@ -289,27 +288,22 @@ function importCsv(content) {
     if (transformed.purchases > 0) {
       totalPurchases += transformed.purchases;
       totalPurchaseValueCents += transformed.purchaseValueCents;
-    }
-    if (transformed.purchases > 0) {
-      totalPurchases += transformed.purchases;
-      totalPurchaseValueCents += transformed.purchaseValueCents;
       const saleValueCents = transformed.purchaseValueCents > 0 ? transformed.purchaseValueCents : Math.round(transformed.purchases * 2990);
       const saleDate = transformed.dateStart || new Date().toISOString();
-      for (let i = 0; i < transformed.purchases; i++) {
-        salesRecords.push({
-          id: `sa_${nowBase}_${crypto.randomBytes(4).toString("hex")}`,
-          gateway: "meta",
-          gatewayTransactionId: `imp_${nowBase}_${crypto.randomBytes(6).toString("hex")}`,
-          eventType: "approved",
-          status: "approved",
-          amountCents: Math.round(saleValueCents / transformed.purchases),
-          currency: "BRL",
-          trackroiClickId: null,
-          source: "meta",
-          createdAt: saleDate,
-          updatedAt: saleDate,
-        });
-      }
+      salesRecords.push({
+        id: `sa_${nowBase}_${crypto.randomBytes(4).toString("hex")}`,
+        gateway: "meta",
+        gatewayTransactionId: `imp_${importId}_${crypto.randomBytes(4).toString("hex")}`,
+        eventType: "approved",
+        status: "approved",
+        amountCents: saleValueCents,
+        currency: "BRL",
+        trackroiClickId: null,
+        source: "meta",
+        quantity: transformed.purchases,
+        createdAt: saleDate,
+        updatedAt: saleDate,
+      });
     }
     seenCampaigns.add(transformed.campaignName);
   }

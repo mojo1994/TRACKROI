@@ -210,6 +210,15 @@ function migrateSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_import_runs_created_at ON import_runs(created_at);
   `);
+
+  const clickColumns = checkDb().prepare("PRAGMA table_info(clicks)").all().map((c) => c.name);
+  if (!clickColumns.includes("quantity")) {
+    exec("ALTER TABLE clicks ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1");
+  }
+  const saleColumns = checkDb().prepare("PRAGMA table_info(sales)").all().map((c) => c.name);
+  if (!saleColumns.includes("quantity")) {
+    exec("ALTER TABLE sales ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1");
+  }
 }
 
 function migrateStateJson() {
@@ -333,7 +342,7 @@ function pruneExpiredSessions() {
 function insertClick(click) {
   const created = click.createdAt || click.created_at || new Date().toISOString();
   run(
-    "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       click.id,
       click.trackroiClickId || click.trackroi_click_id,
@@ -344,6 +353,7 @@ function insertClick(click) {
       click.landingPage || click.landing_page,
       click.referrer ?? null,
       click.fbclid ?? null,
+      Number.isFinite(Number(click.quantity)) && Number(click.quantity) > 0 ? Math.round(Number(click.quantity)) : 1,
       created,
     ]
   );
@@ -381,6 +391,7 @@ function mapClick(row) {
     landingPage: row.landing_page,
     referrer: row.referrer,
     fbclid: row.fbclid,
+    quantity: row.quantity || 1,
     createdAt: row.created_at,
   };
 }
@@ -436,7 +447,7 @@ function countCheckouts() {
 
 function insertSale(sale) {
   run(
-    "INSERT OR IGNORE INTO sales (id, gateway, gateway_transaction_id, event_type, status, amount_cents, currency, trackroi_click_id, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO sales (id, gateway, gateway_transaction_id, event_type, status, amount_cents, currency, trackroi_click_id, source, quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       sale.id,
       sale.gateway,
@@ -447,6 +458,7 @@ function insertSale(sale) {
       sale.currency || "BRL",
       (sale.trackroiClickId ?? sale.trackroi_click_id) ?? null,
       sale.source,
+      Number.isFinite(Number(sale.quantity)) && Number(sale.quantity) > 0 ? Math.round(Number(sale.quantity)) : 1,
       sale.createdAt || sale.created_at || new Date().toISOString(),
       sale.updatedAt || sale.updated_at || new Date().toISOString(),
     ]
@@ -491,6 +503,7 @@ function mapSale(row) {
     currency: row.currency,
     trackroiClickId: row.trackroi_click_id,
     source: row.source,
+    quantity: row.quantity || 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -832,16 +845,16 @@ function dashboardAggregates(source) {
   const clicksWhere = sourceClause(source);
   const spendWhere = sourceClause(source);
   const approved = get(
-    `SELECT COUNT(*) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${salesWhere.sql}`,
+    `SELECT COALESCE(SUM(quantity), 0) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${salesWhere.sql}`,
     salesWhere.params
   );
   const refunded = get(
     `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${salesWhere.sql}`,
     salesWhere.params
   );
-  const totalSales = get(`SELECT COUNT(*) AS n FROM sales WHERE 1=1${salesWhere.sql}`, salesWhere.params).n;
-  const pendingSales = get(`SELECT COUNT(*) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}`, salesWhere.params).n;
-  const clickCount = get(`SELECT COUNT(*) AS n FROM clicks WHERE 1=1${clicksWhere.sql}`, clicksWhere.params).n;
+  const totalSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE 1=1${salesWhere.sql}`, salesWhere.params).n;
+  const pendingSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}`, salesWhere.params).n;
+  const clickCount = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM clicks WHERE 1=1${clicksWhere.sql}`, clicksWhere.params).n;
   const checkoutCount = get("SELECT COUNT(*) AS n FROM checkouts").n;
   const spendCents = get(
     `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM advertising_spend WHERE 1=1${spendWhere.sql}`,

@@ -235,8 +235,11 @@ const routeFetch = {
     return { ok: true, products: products.items || [] };
   },
   connections: async () => {
-    const integrations = await apiFetch("/api/integrations");
-    return { ok: true, integrations: integrations.items || [] };
+    const [integrations, imports] = await Promise.all([
+      apiFetch("/api/integrations"),
+      apiFetch("/api/imports"),
+    ]);
+    return { ok: true, integrations: integrations.items || [], imports: imports.items || [] };
   },
   settings: async () => {
     const settings = await apiFetch("/api/settings");
@@ -400,8 +403,14 @@ async function connectProvider(providerId, button) {
 }
 
 async function testProvider(providerId, button) {
-  setButtonLoading(button, "Testando…");
+  setButtonLoading(button, "Verificando…");
   try {
+    if (providerId === "meta") {
+      await apiFetch("/api/imports");
+      setButtonLoading(button, "");
+      showConnectMessage(providerId, "Servidor pronto para importações.", "success");
+      return;
+    }
     const health = await apiFetch(`/api/integrations/${providerId}/health`);
     setButtonLoading(button, "");
     if (health.configured) {
@@ -724,9 +733,9 @@ function emptyDashboard() {
     <section class="onboarding">
       <div class="onboarding-orb"></div>
       <h3>Bem-vindo ao TrackROI</h3>
-      <p>Conecte suas ferramentas de anúncios e pagamento e o seu painel começa a se preencher automaticamente.</p>
+      <p>Importe a planilha exportada do Gerenciador de Anúncios e o seu painel começa a se preencher automaticamente.</p>
       <div class="onboarding-actions">
-        <a class="btn-primary" href="#connections">Configurar conexões</a>
+        <a class="btn-primary" href="#connections">Importar planilha</a>
         <a class="btn-ghost" href="#metrics">Ver métricas</a>
       </div>
     </section>
@@ -825,58 +834,101 @@ function connectionCard(item) {
   const connected = item.connected === true;
   const status = connected || item.status === "connected" ? "connected" : item.status || "not_connected";
   const notConfigured = item.configured === false;
+  const isMeta = item.id === "meta";
+  const actions = isMeta
+    ? `<button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar importação</button>`
+    : `
+      ${notConfigured
+        ? `<span class="ghost" disabled>Configuração pendente</span>`
+        : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : "Conectar"}</button>`}
+      <button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar conexão</button>
+    `;
+  const body = isMeta
+    ? `
+      <div class="connection-line">
+        ${connected
+          ? "Dados importados das planilhas exportadas do Gerenciador de Anúncios."
+          : "Exporte seus dados como arquivo CSV e importe para atualizar o funil, as métricas, vendas e o ROI."}
+      </div>
+      ${item.lastSyncAt ? `<div class="connection-line muted">Última importação: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
+      ${importPanelHtml(item)}
+    `
+    : `
+      <div class="connection-line">
+        ${connected
+          ? `Conectado${item.connectedAccount ? ` — ${escapeHtml(item.connectedAccount)}` : ""}.`
+          : notConfigured
+            ? "Integração ainda não configurada pelo administrador."
+            : escapeHtml(item.healthMessage || "Sua ferramenta ainda não está conectada.")}
+      </div>
+      ${item.lastSyncAt ? `<div class="connection-line muted">Última sincronização: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
+      <div class="connection-message" data-connect-message="${escapeHtml(item.id)}" hidden></div>
+    `;
   return `
-    <article class="connection-card ${connected ? "is-connected" : ""}" data-provider-card="${escapeHtml(item.id)}">
+    <article class="connection-card ${connected ? "is-connected" : ""} ${isMeta ? "is-import" : ""}" data-provider-card="${escapeHtml(item.id)}">
       <div class="connection-card-head">
         <div class="connection-logo">${escapeHtml((item.displayName || item.id).charAt(0))}</div>
         <div class="connection-card-title">
           <div class="connection-name">${escapeHtml(item.displayName || item.id)}</div>
           <div class="connection-desc">${escapeHtml(item.description || "")}</div>
         </div>
-        ${statusPill(status)}
+        ${statusPill(connected ? "connected" : "configured")}
       </div>
       <div class="connection-card-body">
-        <div class="connection-line">
-          ${connected
-            ? `Conectado${item.connectedAccount ? ` — ${escapeHtml(item.connectedAccount)}` : ""}.`
-            : notConfigured
-              ? "Integração ainda não configurada pelo administrador."
-              : escapeHtml(item.healthMessage || "Sua ferramenta ainda não está conectada.")}
-        </div>
-        ${item.lastSyncAt ? `<div class="connection-line muted">Última sincronização: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
-        <div class="connection-message" data-connect-message="${escapeHtml(item.id)}" hidden></div>
+        ${body}
         <div class="connection-actions">
-          ${notConfigured
-            ? `<span class="ghost" disabled>Configuração pendente</span>`
-            : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : "Conectar"}</button>`}
-          <button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar conexão</button>
+          ${actions}
         </div>
       </div>
     </article>
   `;
 }
 
+function importPanelHtml(item) {
+  return `
+    <div class="import-panel" data-import-panel>
+      <div class="import-dropzone" data-import-dropzone tabindex="0">
+        <input type="file" accept=".csv,text/csv,application/vnd.ms-excel" data-import-file hidden />
+        <div class="import-dropzone-inner">
+          <div class="import-icon">⬆</div>
+          <div class="import-drop-title">Arraste o arquivo CSV ou clique para selecionar</div>
+          <div class="import-drop-hint">Planilha exportada do Gerenciador de Anúncios</div>
+        </div>
+      </div>
+      <div class="import-filename" data-import-filename hidden></div>
+      <div class="import-preview" data-import-preview hidden></div>
+      <div class="import-actions">
+        <button type="button" class="btn-primary" data-import-submit disabled>Importar dados</button>
+        <span class="import-status" data-import-status></span>
+      </div>
+    </div>
+  `;
+}
+
+function importsHistoryHtml(imports) {
+  if (!imports || !imports.length) {
+    return `<div class="empty-state">Nenhuma importação feita ainda.</div>`;
+  }
+  const rows = imports.map((item) => `
+    <tr>
+      <td>${escapeHtml(formatDateTime(item.createdAt))}</td>
+      <td>${escapeHtml(item.filename || "—")}</td>
+      <td>${escapeHtml(item.campaigns)}</td>
+      <td>${escapeHtml(money(item.spendCents || 0))}</td>
+      <td>${escapeHtml(item.clicks)}</td>
+      <td>${escapeHtml(item.totalRows)}</td>
+    </tr>
+  `);
+  return tableHtml(["Data", "Arquivo", "Campanhas", "Gasto", "Cliques", "Linhas"], rows);
+}
+
 function connectionAdvanced(integrations) {
   const byId = (id) => (integrations || []).find((item) => item.id === id) || {};
-  const meta = byId("meta");
   const perfectPay = byId("perfectpay");
   return `
     <details class="advanced-section">
       <summary><span class="advanced-title">Configurações avançadas</span><span class="advanced-caret"></span></summary>
       <div class="advanced-body">
-        <form id="meta-connection-form" class="stack-form compact-form">
-          <div class="form-title">Meta Ads</div>
-          <label><span>Status</span>
-            <select id="meta-status">
-              <option value="not_connected" ${meta.status !== "connected" ? "selected" : ""}>Não conectado</option>
-              <option value="connected" ${meta.status === "connected" ? "selected" : ""}>Conectado</option>
-              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
-            </select>
-          </label>
-          <label><span>ID da conta de anúncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
-          <button type="submit" id="meta-save-button">Salvar Meta</button>
-        </form>
-
         <form id="perfectpay-connection-form" class="stack-form compact-form">
           <div class="form-title">Perfect Pay</div>
           <label><span>Status</span>
@@ -897,6 +949,7 @@ function connectionAdvanced(integrations) {
 
 function connectionsPage(data) {
   const integrations = data.integrations || [];
+  const imports = data.imports || [];
   const connectedCount = integrations.filter((item) => item.connected === true).length;
   const total = integrations.length;
   const allDone = connectedCount === total && total > 0;
@@ -904,22 +957,23 @@ function connectionsPage(data) {
   const hero = `
     <section class="connections-hero">
       <div class="connections-hero-copy">
-        <h3>Conecte suas ferramentas</h3>
-        <p>Vincule seus anúncios e sua plataforma de pagamento. Depois de conectar, os dados entram sozinhos — sem trabalho manual.</p>
+        <h3>Atualize seus dados</h3>
+        <p>Importe as planilhas exportadas do Gerenciador de Anúncios. O TrackROI identifica o gasto, os cliques, as campanhas e as vendas — e atualiza o funil, as métricas e o ROI.</p>
       </div>
       <div class="connections-progress">
         <div class="progress-steps">
           ${integrations
             .map((item, index) => {
               const done = item.connected === true;
+              const isImport = item.id === "meta";
               return `
                 ${index > 0 ? `<span class="progress-line ${integrations[index - 1].connected === true ? "done" : ""}"></span>` : ""}
-                <span class="progress-step ${done ? "done" : ""}">${done ? "✓" : index + 1}</span>
+                <span class="progress-step ${done || isImport ? "done" : ""}">${done || isImport ? "✓" : index + 1}</span>
               `;
             })
             .join("")}
         </div>
-        <div class="progress-label">${allDone ? "Tudo pronto!" : `Faltam ${total - connectedCount} conexões`}</div>
+        <div class="progress-label">${imports.length > 0 ? `${imports.length} importação(ões) realizada(s)` : `Comece importando a planilha da Meta`}</div>
       </div>
     </section>
   `;
@@ -931,6 +985,12 @@ function connectionsPage(data) {
     </section>
   `;
 
+  const history = sectionPanel(
+    "Histórico de importações",
+    "Planilhas enviadas e os dados reconhecidos em cada uma.",
+    importsHistoryHtml(imports)
+  );
+
   const guide = sectionPanel(
     "Como funciona",
     "Três passos simples para começar.",
@@ -938,24 +998,24 @@ function connectionsPage(data) {
     <div class="tutorial-grid">
       <div class="tutorial-card">
         <div class="tutorial-step">1</div>
-        <strong>Conecte o Meta Ads</strong>
-        <p>Clique em "Conectar" e autorize o acesso na janela que abrir.</p>
+        <strong>Exporte a planilha da Meta</strong>
+        <p>No Gerenciador de Anúncios, abra "Resultados" e use Exportar > Formato CSV. Colunas como gasto, cliques no link e campanhas são reconhecidas automaticamente.</p>
       </div>
       <div class="tutorial-card">
         <div class="tutorial-step">2</div>
-        <strong>Conecte o Perfect Pay</strong>
-        <p>Repita o mesmo processo para receber suas vendas.</p>
+        <strong>Importe o arquivo</strong>
+        <p>Arraste o CSV exportado para a área de importação. O TrackROI identifica os campos e mostra um resumo antes de salvar.</p>
       </div>
       <div class="tutorial-card">
         <div class="tutorial-step">3</div>
         <strong>Acompanhe os resultados</strong>
-        <p>O dashboard passa a mostrar vendas, investimento e ROAS em tempo real.</p>
+        <p>Funil, investimento, cliques, vendas e ROI são atualizados automaticamente a partir dos dados importados.</p>
       </div>
     </div>
     `
   );
 
-  return `${hero}${cards}${connectionAdvanced(integrations)}${guide}`;
+  return `${hero}${cards}${history}${connectionAdvanced(integrations)}${guide}`;
 }
 
 function settingsPage(data) {
@@ -1052,6 +1112,234 @@ function renderPage() {
   attachPageHandlers();
 }
 
+/* ------------------------------------------------------------- Import handlers */
+
+let importSelectedFile = null;
+
+function setupImportHandlers() {
+  document.querySelectorAll("[data-import-panel]").forEach((panel) => {
+    const dropzone = panel.querySelector("[data-import-dropzone]");
+    const fileInput = panel.querySelector("[data-import-file]");
+    const submit = panel.querySelector("[data-import-submit]");
+    const statusNode = panel.querySelector("[data-import-status]");
+    const filenameNode = panel.querySelector("[data-import-filename]");
+    const previewNode = panel.querySelector("[data-import-preview]");
+
+    const updateSubmit = () => {
+      submit.disabled = !importSelectedFile;
+      if (importSelectedFile) {
+        filenameNode.hidden = false;
+        filenameNode.textContent = `Arquivo selecionado: ${importSelectedFile.name}`;
+      } else {
+        filenameNode.hidden = true;
+      }
+    };
+
+    dropzone.addEventListener("click", () => {
+      if (!importSelectedFile) fileInput.click();
+    });
+    dropzone.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (!importSelectedFile) fileInput.click();
+      }
+    });
+    dropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropzone.classList.add("is-dragging");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("is-dragging"));
+    dropzone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("is-dragging");
+      const file = event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) handleImportFile(file);
+    });
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) handleImportFile(file);
+      fileInput.value = "";
+    });
+
+    function handleImportFile(file) {
+      importSelectedFile = file;
+      updateSubmit();
+      statusNode.textContent = "";
+      statusNode.className = "import-status";
+      if (!/\.(csv|xlsx|xls)$/i.test(file.name)) {
+        showImportStatus(statusNode, "Formato não suportado. Exporte a planilha como CSV.", "error");
+        importSelectedFile = null;
+        updateSubmit();
+        return;
+      }
+      if (/\.(xlsx|xls)$/i.test(file.name)) {
+        showImportStatus(statusNode, "Exporte como CSV (Arquivo > Exportar > CSV) para importar.", "error");
+        importSelectedFile = null;
+        updateSubmit();
+        return;
+      }
+      previewNode.hidden = true;
+      previewNode.innerHTML = "";
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const preview = buildImportPreview(reader.result, file.name);
+          previewNode.hidden = false;
+          previewNode.innerHTML = preview.html;
+        } catch (error) {
+          showImportStatus(statusNode, error.message || "Não foi possível ler o arquivo.", "error");
+        }
+      };
+      reader.readAsText(file, "utf-8");
+    }
+
+    if (submit) {
+      submit.onclick = async () => {
+        if (!importSelectedFile) return;
+        setButtonLoading(submit, "Importando…");
+        statusNode.textContent = "Analisando a planilha…";
+        statusNode.className = "import-status";
+        try {
+          const formData = new FormData();
+          formData.append("file", importSelectedFile);
+          formData.append("mode", "backfill");
+          const result = await apiUpload("/api/import/csv", formData);
+          const stats = result.stats || {};
+          const nf = new Intl.NumberFormat("pt-BR");
+          showImportStatus(
+            statusNode,
+            `Importação concluída: ${nf.format(stats.campaigns.length)} campanhas · ${money(stats.totalSpendCents || 0)} em gasto · ${nf.format(stats.totalClicks)} cliques.`,
+            "success"
+          );
+          importSelectedFile = null;
+          updateSubmit();
+          previewNode.hidden = true;
+          previewNode.innerHTML = "";
+          await loadData("connections", { silent: true });
+        } catch (error) {
+          showImportStatus(statusNode, friendlyError(error), "error");
+        } finally {
+          setButtonLoading(submit, "");
+        }
+      };
+    }
+  });
+}
+
+function showImportStatus(node, message, tone) {
+  if (!node) return;
+  node.textContent = message;
+  node.className = "import-status";
+  if (tone === "success") node.classList.add("is-success");
+  if (tone === "error") node.classList.add("is-error");
+}
+
+async function apiUpload(path, formData) {
+  const headers = {};
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (state.csrfToken) headers["X-CSRF-Token"] = state.csrfToken;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, { method: "POST", headers, body: formData });
+  } catch (networkError) {
+    throw new Error("Não foi possível conectar. Verifique sua internet e tente novamente.");
+  }
+  if (response.status === 401) {
+    state.token = "";
+    state.csrfToken = "";
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(CSRF_KEY);
+    throw new Error("AUTH_REQUIRED");
+  }
+  const text = await response.text();
+  let body = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = {};
+    }
+  }
+  if (!response.ok) {
+    throw new Error(body.error || `Erro ao importar a planilha.`);
+  }
+  return body;
+}
+
+function buildImportPreview(content, filename) {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    throw new Error("O arquivo está vazio ou não contém linhas de dados.");
+  }
+  const headers = lines[0].split(",").map((cell) => cell.replace(/^"|"$/g, "").trim());
+  const normHeader = (h) => h.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const seen = new Set();
+  const previewAliases = {
+    campaignName: ["titulo do conjunto de anuncios", "conjunto de anuncios", "campaign name", "nome da campanha", "titulo da campanha", "campanha"],
+    amountSpent: ["valor gasto", "amount spent", "investimento", "gasto", "spend"],
+    linkClicks: ["cliques no link", "link clicks", "cliques"],
+    impressions: ["impressoes", "impressions"],
+    dateStart: ["periodo de relatorio", "data de inicio", "data do relatorio", "data", "date"],
+  };
+  Object.keys(previewAliases).forEach((field) => {
+    const aliases = [...previewAliases[field]].sort((a, b) => b.length - a.length);
+    for (const header of headers) {
+      const normalized = normHeader(header);
+      if (aliases.some((alias) => normalized.includes(alias))) {
+        seen.add(field);
+        break;
+      }
+    }
+  });
+
+  const previewHeaders = headers.slice(0, 6);
+  const previewRows = lines.slice(1, 4).map((line) => {
+    const cells = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { current += '"'; i++; }
+          else inQuotes = false;
+        } else current += ch;
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ",") {
+        cells.push(current);
+        current = "";
+      } else current += ch;
+    }
+    cells.push(current);
+    return cells.slice(0, 6);
+  });
+
+  const tags = [
+    seen.has("campaignName") ? ["Campanhas", "ok"] : null,
+    seen.has("amountSpent") ? ["Gasto", "ok"] : null,
+    seen.has("linkClicks") ? ["Cliques no link", "ok"] : null,
+    seen.has("impressions") ? ["Impressões", "ok"] : null,
+  ].filter(Boolean);
+
+  const table = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>${previewHeaders.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${previewRows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  const badges = tags.length
+    ? `<div class="import-tags">${tags.map(([label]) => `<span class="import-tag">✓ ${escapeHtml(label)}</span>`).join("")}</div>`
+    : `<div class="import-alert">Nenhuma coluna conhecida encontrada neste arquivo.</div>`;
+
+  return { html: `<div class="import-preview-inner">${badges}${table}</div>` };
+}
+
 /* ------------------------------------------------------------- Handlers */
 
 function attachPageHandlers() {
@@ -1114,29 +1402,7 @@ function attachPageHandlers() {
     };
   }
 
-  const metaConnectionForm = el("meta-connection-form");
-  if (metaConnectionForm) {
-    metaConnectionForm.onsubmit = async (event) => {
-      event.preventDefault();
-      const submit = el("meta-save-button") || metaConnectionForm.querySelector("button[type=submit]");
-      setButtonLoading(submit, "Salvando…");
-      try {
-        await apiFetch("/api/integrations/meta", {
-          method: "PUT",
-          body: JSON.stringify({
-            status: el("meta-status").value,
-            adAccountId: el("meta-ad-account-id").value.trim(),
-          }),
-        });
-        setStatus("Configurações do Meta salvas.", "success");
-        await loadData(state.route, { silent: true });
-      } catch (error) {
-        setStatus(friendlyError(error), "error");
-      } finally {
-        setButtonLoading(submit, "");
-      }
-    };
-  }
+  setupImportHandlers();
 
   const perfectPayConnectionForm = el("perfectpay-connection-form");
   if (perfectPayConnectionForm) {

@@ -191,6 +191,24 @@ function migrateSchema() {
       first_attempt INTEGER NOT NULL,
       count INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS import_runs (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      filename TEXT,
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      imported_spend INTEGER NOT NULL DEFAULT 0,
+      imported_clicks INTEGER NOT NULL DEFAULT 0,
+      spend_cents INTEGER NOT NULL DEFAULT 0,
+      clicks INTEGER NOT NULL DEFAULT 0,
+      campaigns INTEGER NOT NULL DEFAULT 0,
+      preview TEXT,
+      status TEXT NOT NULL DEFAULT 'completed',
+      error TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_runs_created_at ON import_runs(created_at);
   `);
 }
 
@@ -313,6 +331,7 @@ function pruneExpiredSessions() {
 /* ------------------------------------------------------------- Clicks */
 
 function insertClick(click) {
+  const created = click.createdAt || click.created_at || new Date().toISOString();
   run(
     "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
@@ -320,12 +339,12 @@ function insertClick(click) {
       click.trackroiClickId || click.trackroi_click_id,
       click.source,
       click.campaignId || click.campaign_id,
-      click.adsetId || click.adset_id,
-      click.adId || click.ad_id,
+      (click.adsetId ?? click.adset_id) ?? null,
+      (click.adId ?? click.ad_id) ?? null,
       click.landingPage || click.landing_page,
-      click.referrer,
-      click.fbclid,
-      click.createdAt || click.created_at || new Date().toISOString(),
+      click.referrer ?? null,
+      click.fbclid ?? null,
+      created,
     ]
   );
 }
@@ -379,7 +398,7 @@ function findClickByTrackroiId(trackroiClickId) {
 function insertCheckout(checkout) {
   run("INSERT OR IGNORE INTO checkouts (id, trackroi_click_id, status, created_at) VALUES (?, ?, ?, ?)", [
     checkout.id,
-    checkout.trackroiClickId || checkout.trackroi_click_id,
+    (checkout.trackroiClickId ?? checkout.trackroi_click_id) ?? null,
     checkout.status || "initiated",
     checkout.createdAt || checkout.created_at || new Date().toISOString(),
   ]);
@@ -422,11 +441,11 @@ function insertSale(sale) {
       sale.id,
       sale.gateway,
       sale.gatewayTransactionId || sale.gateway_transaction_id,
-      sale.eventType || sale.event_type,
+      sale.eventType ?? sale.event_type,
       sale.status,
       sale.amountCents ?? sale.amount_cents ?? 0,
       sale.currency || "BRL",
-      sale.trackroiClickId || sale.trackroi_click_id,
+      (sale.trackroiClickId ?? sale.trackroi_click_id) ?? null,
       sale.source,
       sale.createdAt || sale.created_at || new Date().toISOString(),
       sale.updatedAt || sale.updated_at || new Date().toISOString(),
@@ -550,6 +569,60 @@ function createSpend({ source, amountCents, currency }) {
   };
   insertSpend(spend);
   return { ...spend, id: spend.id };
+}
+
+/* ------------------------------------------------------------- Import runs */
+
+function insertImportRun(entry) {
+  run(
+    `INSERT INTO import_runs (id, type, filename, total_rows, imported_spend, imported_clicks, spend_cents, clicks, campaigns, preview, status, error, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      entry.id || `imp_${crypto.randomUUID()}`,
+      entry.type || "meta",
+      entry.filename || null,
+      entry.totalRows ?? 0,
+      entry.importedSpend ?? 0,
+      entry.importedClicks ?? 0,
+      entry.spendCents ?? 0,
+      entry.clicks ?? 0,
+      entry.campaigns ?? 0,
+      entry.preview ? JSON.stringify(entry.preview) : null,
+      entry.status || "completed",
+      entry.error || null,
+      entry.createdAt || new Date().toISOString(),
+      entry.createdBy || null,
+    ]
+  );
+}
+
+function listImportRuns(limit = 20) {
+  return all("SELECT * FROM import_runs ORDER BY created_at DESC LIMIT ?", [limit]).map(mapImportRun);
+}
+
+function mapImportRun(row) {
+  let preview = null;
+  try {
+    preview = row.preview ? JSON.parse(row.preview) : null;
+  } catch {
+    preview = null;
+  }
+  return {
+    id: row.id,
+    type: row.type,
+    filename: row.filename,
+    totalRows: row.total_rows,
+    importedSpend: row.imported_spend,
+    importedClicks: row.imported_clicks,
+    spendCents: row.spend_cents,
+    clicks: row.clicks,
+    campaigns: row.campaigns,
+    preview,
+    status: row.status,
+    error: row.error,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+  };
 }
 
 /* ------------------------------------------------------------- Audit logs */
@@ -766,7 +839,7 @@ function dashboardAggregates(source) {
     `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${salesWhere.sql}`,
     salesWhere.params
   );
-  const totalSales = get(`SELECT COUNT(*) AS n FROM sales${salesWhere.sql}`, salesWhere.params).n;
+  const totalSales = get(`SELECT COUNT(*) AS n FROM sales WHERE 1=1${salesWhere.sql}`, salesWhere.params).n;
   const pendingSales = get(`SELECT COUNT(*) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}`, salesWhere.params).n;
   const clickCount = get(`SELECT COUNT(*) AS n FROM clicks WHERE 1=1${clicksWhere.sql}`, clicksWhere.params).n;
   const checkoutCount = get("SELECT COUNT(*) AS n FROM checkouts").n;
@@ -824,6 +897,8 @@ module.exports = {
   countWebhookEvents,
   insertSpend,
   createSpend,
+  insertImportRun,
+  listImportRuns,
   insertAuditLog,
   appendAuditLog,
   listAuditLogs,

@@ -8,6 +8,7 @@ const db = require("./src/db");
 const { logger, newRequestId } = require("./src/logger");
 const { encryptSecret, decryptSecret, assertEncryptionKey } = require("./src/crypto");
 const { buildDashboardFromAggregates } = require("./src/metrics");
+const { importCsv } = require("./src/csv-import");
 const providers = require("./src/providers");
 
 const PORT = Number(process.env.PORT || 4100);
@@ -54,6 +55,54 @@ function readRawBody(req) {
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
+}
+
+function readRawBodyBuffer(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function parseMultipart(body, contentType) {
+  const files = [];
+  const fields = {};
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  if (!match) return { files, fields };
+  const boundary = match[1] || match[2];
+  const marker = Buffer.from(`--${boundary}`);
+  const first = body.indexOf(marker);
+  if (first === -1) return { files, fields };
+  const parts = [];
+  let start = first + marker.length;
+  while (start < body.length) {
+    if (body[start] === 0x0d && body[start + 1] === 0x0a) start += 2;
+    const next = body.indexOf(marker, start);
+    let end = next !== -1 ? (body[next - 2] === 0x0d && body[next - 1] === 0x0a ? next - 2 : next) : body.length;
+    parts.push(body.slice(start, end));
+    if (next === -1) break;
+    start = next + marker.length;
+  }
+  for (const part of parts) {
+    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
+    if (headerEnd === -1) continue;
+    const headerText = part.slice(0, headerEnd).toString("utf8");
+    const content = part.slice(headerEnd + 4);
+    const nameMatch = /name="([^"]*)"/.exec(headerText);
+    const filenameMatch = /filename="([^"]*)"/.exec(headerText);
+    if (filenameMatch && nameMatch) {
+      files.push({
+        fieldname: nameMatch[1],
+        filename: filenameMatch[1],
+        content: content.toString("utf8"),
+      });
+    } else if (nameMatch) {
+      fields[nameMatch[1]] = content.toString("utf8").trim();
+    }
+  }
+  return { files, fields };
 }
 
 async function parseBody(req, keepRaw = false) {
@@ -484,6 +533,134 @@ async function handleIntegrationUpdate(req, res, match, user) {
   });
   broadcastSSE({ type: "data", changed: ["integrations"] });
   send(res, 200, { ok: true, item: publicIntegration(provider) }, {}, req);
+}
+
+/* ------------------------------------------------------------- Import CSV */
+
+async function handleImportCsv(req, res, user) {
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  if (!contentType.includes("multipart/form-data")) {
+    send(res, 400, { ok: false, error: "Envie o arquivo como multipart/form-data." }, {}, req);
+    return;
+  }
+  let raw;
+  try {
+    raw = await readRawBodyBuffer(req);
+  } catch {
+    send(res, 400, { ok: false, error: "Não foi possível ler o arquivo enviado." }, {}, req);
+    return;
+  }
+  const { files, fields } = parseMultipart(raw, String(req.headers["content-type"] || ""));
+  const file = files.find((f) => f.fieldname === "file");
+  if (!file) {
+    send(res, 400, { ok: false, error: "Nenhum arquivo enviado." }, {}, req);
+    return;
+  }
+  const mode = String(fields.mode || "backfill");
+  const filename = file.filename;
+  if (/\.xlsx$|\.xls$/i.test(filename)) {
+    send(res, 400, { ok: false, error: "Formato não suportado. Exporte a planilha como CSV (Arquivo > Exportar > CSV) e envie novamente." }, {}, req);
+    return;
+  }
+  const content = file.content;
+  if (!content || !content.trim()) {
+    send(res, 400, { ok: false, error: "O arquivo está vazio." }, {}, req);
+    return;
+  }
+  let result;
+  try {
+    result = importCsv(content);
+  } catch (error) {
+    send(res, 400, { ok: false, error: `Não foi possível processar o arquivo: ${error.message}` }, {}, req);
+    return;
+  }
+  if (!result.ok) {
+    send(res, 400, { ok: false, error: result.error }, {}, req);
+    return;
+  }
+
+  let commits;
+  try {
+    commits = db.transaction(() => {
+      let spendCommitted = 0;
+      let clicksCommitted = 0;
+      let salesCommitted = 0;
+      for (const record of result.spendRecords) {
+        db.insertSpend(record);
+        spendCommitted++;
+      }
+      for (const record of result.clicksRecords) {
+        db.insertClick(record);
+        clicksCommitted++;
+      }
+      for (const record of result.salesRecords || []) {
+        db.insertSale(record);
+        salesCommitted++;
+      }
+      const commissionSummary = {
+        importId: result.importId,
+        totalSpendCents: result.stats.totalSpendCents,
+        totalClicks: result.stats.totalClicks,
+        totalImpressions: result.stats.totalImpressions,
+        totalReach: result.stats.totalReach,
+        totalPurchases: result.stats.totalPurchases,
+        totalPurchaseValueCents: result.stats.totalPurchaseValueCents,
+        campaigns: result.campaigns,
+        columnMap: result.columnMap,
+      };
+      db.insertImportRun({
+        id: result.importId,
+        type: "meta",
+        filename,
+        totalRows: result.totalRows,
+        importedSpend: spendCommitted,
+        importedClicks: clicksCommitted,
+        spendCents: result.stats.totalSpendCents,
+        clicks: result.stats.totalClicks,
+        campaigns: result.campaigns.length,
+        preview: commissionSummary,
+        status: "completed",
+        createdBy: user.id,
+      });
+      return { ...commissionSummary, salesCommitted };
+    });
+  } catch (error) {
+    logger.error("Import CSV commit failed", { error: error.message });
+    db.appendAuditLog({
+      actorUserId: user.id,
+      action: "import.meta.failed",
+      resourceType: "import",
+      resourceId: result.importId,
+      metadata: { error: error.message },
+    });
+    send(res, 500, { ok: false, error: `Erro ao salvar os dados importados: ${error.message}` }, {}, req);
+    return;
+  }
+
+  db.appendAuditLog({
+    actorUserId: user.id,
+    action: "import.meta.meta",
+    resourceType: "import",
+    resourceId: result.importId,
+    metadata: { totalRows: result.totalRows, spendCents: commits.totalSpendCents, campaigns: commits.campaigns.length },
+  });
+  const now = new Date().toISOString();
+  const metaIntegration = db.getIntegration("meta");
+  db.upsertIntegration("meta", {
+    ...metaIntegration,
+    status: "connected",
+    connected: true,
+    lastSyncAt: now,
+    importsCount: (metaIntegration.importsCount || 0) + 1,
+    lastImportId: result.importId,
+    errors: [],
+  });
+  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "metrics", "logs", "integrations"] });
+  send(res, 200, { ok: true, importId: result.importId, stats: commits }, {}, req);
+}
+
+async function handleListImportRuns(req, res) {
+  send(res, 200, { ok: true, items: db.listImportRuns(20) }, {}, req);
 }
 
 /* ------------------------------------------------------------- Auth */
@@ -1015,6 +1192,16 @@ async function main() {
         db.appendAuditLog({ actorUserId: auth.user.id, action: "spend.create", resourceType: "spend", resourceId: spend.id });
         broadcastSSE({ type: "data", changed: ["dashboard", "metrics", "funnel"] });
         send(res, 201, { ok: true, item: spend }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/import/csv") {
+        await handleImportCsv(req, res, auth.user);
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/imports") {
+        await handleListImportRuns(req, res);
         return;
       }
 

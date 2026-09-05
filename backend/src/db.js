@@ -345,12 +345,12 @@ function insertClick(click) {
     "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       click.id,
-      click.trackroiClickId || click.trackroi_click_id,
-      click.source,
-      click.campaignId || click.campaign_id,
+      (click.trackroiClickId ?? click.trackroi_click_id) ?? null,
+      click.source || "direct",
+      (click.campaignId ?? click.campaign_id) ?? null,
       (click.adsetId ?? click.adset_id) ?? null,
       (click.adId ?? click.ad_id) ?? null,
-      click.landingPage || click.landing_page,
+      (click.landingPage ?? click.landing_page) ?? "/",
       click.referrer ?? null,
       click.fbclid ?? null,
       Number.isFinite(Number(click.quantity)) && Number(click.quantity) > 0 ? Math.round(Number(click.quantity)) : 1,
@@ -840,25 +840,26 @@ function sourceClause(source) {
   return { sql: " AND source = ?", params: [String(source).toLowerCase()] };
 }
 
-function dashboardAggregates(source) {
+function dashboardAggregates(source, period = null) {
   const salesWhere = sourceClause(source);
   const clicksWhere = sourceClause(source);
   const spendWhere = sourceClause(source);
+  const pd = period && period.sql ? { sql: period.sql, params: period.params } : { sql: "", params: [] };
   const approved = get(
-    `SELECT COALESCE(SUM(quantity), 0) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${salesWhere.sql}`,
-    salesWhere.params
+    `SELECT COALESCE(SUM(quantity), 0) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${salesWhere.sql}${pd.sql}`,
+    [...salesWhere.params, ...pd.params]
   );
   const refunded = get(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${salesWhere.sql}`,
-    salesWhere.params
+    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${salesWhere.sql}${pd.sql}`,
+    [...salesWhere.params, ...pd.params]
   );
-  const totalSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE 1=1${salesWhere.sql}`, salesWhere.params).n;
-  const pendingSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}`, salesWhere.params).n;
-  const clickCount = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM clicks WHERE 1=1${clicksWhere.sql}`, clicksWhere.params).n;
-  const checkoutCount = get("SELECT COUNT(*) AS n FROM checkouts").n;
+  const totalSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE 1=1${salesWhere.sql}${pd.sql}`, [...salesWhere.params, ...pd.params]).n;
+  const pendingSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}${pd.sql}`, [...salesWhere.params, ...pd.params]).n;
+  const clickCount = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM clicks WHERE 1=1${clicksWhere.sql}${pd.sql}`, [...clicksWhere.params, ...pd.params]).n;
+  const checkoutCount = get(`SELECT COUNT(*) AS n FROM checkouts WHERE 1=1${pd.sql}`, pd.params).n;
   const spendCents = get(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM advertising_spend WHERE 1=1${spendWhere.sql}`,
-    spendWhere.params
+    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM advertising_spend WHERE 1=1${spendWhere.sql}${pd.sql}`,
+    [...spendWhere.params, ...pd.params]
   ).amount;
   return {
     approvedCount: approved.count,

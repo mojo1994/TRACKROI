@@ -8,6 +8,7 @@ const db = require("./src/db");
 const { logger, newRequestId } = require("./src/logger");
 const { encryptSecret, decryptSecret, assertEncryptionKey } = require("./src/crypto");
 const { buildDashboardFromAggregates } = require("./src/metrics");
+const { resolvePeriod } = require("./src/period");
 const { importCsv } = require("./src/csv-import");
 const providers = require("./src/providers");
 
@@ -1036,16 +1037,18 @@ async function main() {
       }
 
       if (req.method === "GET" && pathname === "/api/dashboard") {
+        const period = resolvePeriod(query);
         const source = String(query.source || "all").toLowerCase();
-        const aggregates = db.dashboardAggregates(source);
-        send(res, 200, buildDashboardFromAggregates({ aggregates, source }), {}, req);
+        const aggregates = db.dashboardAggregates(source, period);
+        send(res, 200, buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance }), {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/metrics") {
+        const period = resolvePeriod(query);
         const source = String(query.source || "all").toLowerCase();
-        const aggregates = db.dashboardAggregates(source);
-        const dashboard = buildDashboardFromAggregates({ aggregates, source });
+        const aggregates = db.dashboardAggregates(source, period);
+        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance });
         send(res, 200, { ok: true, metrics: dashboard.summary, cards: dashboard.cards, funnel: dashboard.funnel }, {}, req);
         return;
       }
@@ -1130,6 +1133,7 @@ async function main() {
           general: { ...(current.general || {}), ...((body || {}).general || {}) },
           appearance: { ...(current.appearance || {}), ...((body || {}).appearance || {}) },
           dashboard: { ...(current.dashboard || {}), ...((body || {}).dashboard || {}) },
+          finance: { ...(current.finance || {}), ...((body || {}).finance || {}) },
         });
         db.appendAuditLog({ actorUserId: auth.user.id, action: "settings.update", resourceType: "settings", resourceId: "global" });
         broadcastSSE({ type: "data", changed: ["settings"] });

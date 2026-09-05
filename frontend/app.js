@@ -2,12 +2,29 @@ const API_BASE = window.__API_BASE__ || "";
 const TOKEN_KEY = "trackroi_token";
 const CSRF_KEY = "trackroi_csrf";
 
+function loadPeriod() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("trackroi_period") || '{"key":"30d"}');
+    if (saved && typeof saved.key === "string") {
+      return { key: saved.key, from: typeof saved.from === "string" ? saved.from : "", to: typeof saved.to === "string" ? saved.to : "" };
+    }
+  } catch {
+    /* ignora */
+  }
+  return { key: "30d", from: "", to: "" };
+}
+
+function persistPeriod() {
+  localStorage.setItem("trackroi_period", JSON.stringify(state.period));
+}
+
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   csrfToken: localStorage.getItem(CSRF_KEY) || "",
   user: null,
   route: normalizeRoute(location.hash.slice(1) || "dashboard"),
   source: "all",
+  period: loadPeriod(),
   routeData: null,
   dataCache: {},
   loading: false,
@@ -223,9 +240,9 @@ function mountSidebarIcons() {
 /* ------------------------------------------------------------- Data loading */
 
 const routeFetch = {
-  dashboard: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
-  funnel: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
-  metrics: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
+  dashboard: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
+  funnel: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
+  metrics: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
   sales: async () => {
     const sales = await apiFetch("/api/sales");
     return { ok: true, sales: sales.items || [], pagination: sales.pagination };
@@ -685,6 +702,20 @@ function tableHtml(headers, rows) {
   `;
 }
 
+function dashboardQuery() {
+  const parts = [`source=${encodeURIComponent(state.source)}`, `period=${encodeURIComponent(state.period.key)}`];
+  if (state.period.key === "custom" && state.period.from && state.period.to) {
+    parts.push(`from=${encodeURIComponent(state.period.from)}`, `to=${encodeURIComponent(state.period.to)}`);
+  }
+  return parts.join("&");
+}
+
+function clearDashboardCache() {
+  state.dataCache.dashboard = null;
+  state.dataCache.funnel = null;
+  state.dataCache.metrics = null;
+}
+
 function pageControls(route) {
   const controls = el("page-controls");
   if (!controls) return;
@@ -699,11 +730,29 @@ function pageControls(route) {
       </select>
     </label>
   `;
+  const periodSelect = `
+    <label class="select-wrap">
+      <span>Período</span>
+      <select id="period-filter">
+        <option value="today" ${state.period.key === "today" ? "selected" : ""}>Hoje</option>
+        <option value="yesterday" ${state.period.key === "yesterday" ? "selected" : ""}>Ontem</option>
+        <option value="7d" ${state.period.key === "7d" ? "selected" : ""}>Últimos 7 dias</option>
+        <option value="30d" ${state.period.key === "30d" ? "selected" : ""}>Últimos 30 dias</option>
+        <option value="custom" ${state.period.key === "custom" ? "selected" : ""}>Personalizado</option>
+      </select>
+    </label>
+  `;
+  const customDates = state.period.key === "custom"
+    ? `
+      <label class="select-wrap"><span>De</span><input id="period-from" type="date" value="${escapeHtml(state.period.from || "")}" /></label>
+      <label class="select-wrap"><span>Até</span><input id="period-to" type="date" value="${escapeHtml(state.period.to || "")}" /></label>
+    `
+    : "";
   const routeControls = {
-    dashboard: `${sourceSelect}${refresh}`,
-    funnel: `${sourceSelect}${refresh}`,
+    dashboard: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
+    funnel: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
+    metrics: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
     sales: refresh,
-    metrics: refresh,
     products: `<button id="product-create-button" type="button">Novo produto</button>${refresh}`,
     connections: refresh,
     settings: `<button id="save-settings-button" type="button">Salvar</button>${refresh}`,
@@ -745,13 +794,14 @@ function emptyDashboard() {
 function dashboardPage(data) {
   const hasData = data && data.empty === false;
   const nf = new Intl.NumberFormat("pt-BR");
+  const periodLabel = data.filters?.period?.label ? `${data.filters.period.label} · ` : "";
   const funnelSub = data.funnel?.stages?.length
     ? data.funnel.stages.map((stage) => `${nf.format(stage.count)} ${stage.label.toLowerCase()}`).join(" · ")
     : "Cliques, visitas, checkouts e vendas.";
   const body = hasData
     ? `
       ${renderMetricCards(data.cards || [])}
-      ${sectionPanel("Funil de conversão", funnelSub, uvFunnelHtml(data.funnel))}
+      ${sectionPanel("Funil de conversão", `${periodLabel}${funnelSub}`, uvFunnelHtml(data.funnel))}
     `
     : emptyDashboard();
   return body;
@@ -781,13 +831,26 @@ function funnelPage(data) {
 }
 
 function metricsSummary(summary) {
+  const f = summary.finance || {};
+  const nf = new Intl.NumberFormat("pt-BR");
+  const pct = (value) => (value == null ? "0,0%" : `${(value * 100).toFixed(1).replace(".", ",")}%`);
+  const ratioText = (value) => (value == null ? "0,00" : nf.format(Number(value).toFixed(2)));
   const items = [
-    ["Cliques", summary.clickCount],
-    ["Checkouts iniciados", summary.checkoutCount],
-    ["Vendas aprovadas", summary.approvedSales],
-    ["Pendentes", summary.pendingSales],
-    ["AOV (ticket médio)", summary.aov == null ? "—" : money(summary.aov * 100)],
-    ["Taxa de conversão", percent(summary.cvr != null ? summary.cvr * 100 : null)],
+    ["Investimento em Ads", money(f.adSpendCents)],
+    ["Receita aprovada", money(f.revenueCents)],
+    ["Lucro bruto", money(f.grossProfitCents)],
+    ["Custos de trabalho", money(f.laborCostCents)],
+    ["Lucro operacional", money(f.operatingProfitCents)],
+    ["ROAS médio", ratioText(f.roas)],
+    ["ROI médio", pct(f.roi)],
+    ["CPA médio", money(f.cpa == null ? 0 : f.cpa * 100)],
+    ["AOV (ticket médio)", money(f.aov == null ? 0 : f.aov * 100)],
+    ["Vendas aprovadas", nf.format(f.approved || 0)],
+    ["Pendentes", nf.format(f.pending || 0)],
+    ["Cliques", nf.format(f.clicks || 0)],
+    ["Checkouts iniciados", nf.format(f.checkouts || 0)],
+    ["Taxa de conversão", pct(f.cvr)],
+    ["Dias no período", nf.format(f.days || 0)],
   ];
   return `
     <div class="info-grid">
@@ -798,9 +861,12 @@ function metricsSummary(summary) {
 
 function metricsPage(data) {
   const summary = data.summary || {};
+  const periodLabel = summary.period?.label
+    ? `Período: ${summary.period.label} · calculado com dados reais do período`
+    : "Indicadores calculados automaticamente.";
   return `
     ${renderMetricCards(data.cards || [])}
-    ${sectionPanel("Resumo detalhado", "Indicadores calculados automaticamente.", metricsSummary(summary))}
+    ${sectionPanel("Resumo financeiro e operacional", periodLabel, metricsSummary(summary))}
   `;
 }
 
@@ -1021,18 +1087,44 @@ function connectionsPage(data) {
 function settingsPage(data) {
   const settings = data.settings || {};
   const general = settings.general || {};
-  return sectionPanel(
-    "Configurações",
-    "Preferências da sua conta.",
-    `
-    <form id="settings-form" class="settings-grid">
-      <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(general.companyName || "")}" /></label>
-      <label><span>Fuso horário</span><input id="timezone" type="text" value="${escapeHtml(general.timezone || "")}" /></label>
-      <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(general.currency || "")}" /></label>
-      <div class="form-actions"><button type="submit" id="save-settings-submit">Salvar</button><span class="form-status" id="settings-form-status"></span></div>
-    </form>
-    `
-  );
+  const finance = settings.finance || {};
+  return `
+    ${sectionPanel(
+      "Configurações",
+      "Preferências da sua conta.",
+      `
+      <form id="settings-form" class="settings-grid">
+        <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(general.companyName || "")}" /></label>
+        <label><span>Fuso horário</span><input id="timezone" type="text" value="${escapeHtml(general.timezone || "")}" /></label>
+        <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(general.currency || "")}" /></label>
+        <div class="form-actions"><button type="submit" id="save-settings-submit">Salvar</button><span class="form-status" id="settings-form-status"></span></div>
+      </form>
+      `
+    )}
+    ${sectionPanel(
+      "Custos de trabalho",
+      "Usados no resumo financeiro. Custo diário é somado por dia no período; o mensal é rateado proporcionalmente aos dias selecionados.",
+      `
+      <form id="finance-form" class="settings-grid">
+        <label><span>Custo de trabalho por dia (R$)</span><input id="labor-cost-day" type="number" min="0" step="0.01" value="${finance.laborCostPerDay != null ? finance.laborCostPerDay : ""}" placeholder="0,00" /></label>
+        <label><span>Custo de trabalho por mês (R$)</span><input id="labor-cost-month" type="number" min="0" step="0.01" value="${finance.laborCostMonthly != null ? finance.laborCostMonthly : ""}" placeholder="0,00" /></label>
+        <div class="form-actions"><button type="submit">Salvar custos</button><span class="form-status" id="finance-form-status"></span></div>
+      </form>
+      `
+    )}
+  `;
+}
+
+function parseMoneyInput(value) {
+  const num = Number(String(value).replace(",", "."));
+  return Number.isFinite(num) && num >= 0 ? num : 0;
+}
+
+function toISODate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function logsPage(data) {
@@ -1353,9 +1445,47 @@ function attachPageHandlers() {
   if (source) {
     source.onchange = () => {
       state.source = source.value;
-      state.dataCache.dashboard = null;
-      state.dataCache.funnel = null;
-      state.dataCache.metrics = null;
+      clearDashboardCache();
+      loadData(state.route);
+    };
+  }
+
+  const periodFilter = el("period-filter");
+  if (periodFilter) {
+    periodFilter.onchange = () => {
+      const key = periodFilter.value;
+      state.period.key = key;
+      if (key === "custom") {
+        if (!state.period.from || !state.period.to) {
+          const today = new Date();
+          const todayStr = toISODate(today);
+          const fromDate = new Date(today);
+          fromDate.setDate(fromDate.getDate() - 29);
+          state.period.from = state.period.from || toISODate(fromDate);
+          state.period.to = state.period.to || todayStr;
+        }
+        persistPeriod();
+        renderPage();
+      } else {
+        persistPeriod();
+        clearDashboardCache();
+        loadData(state.route);
+      }
+    };
+  }
+  const periodFrom = el("period-from");
+  const periodTo = el("period-to");
+  if (periodFrom && periodTo) {
+    periodFrom.onchange = () => {
+      state.period.from = periodFrom.value;
+      persistPeriod();
+      clearDashboardCache();
+      loadData(state.route);
+    };
+    periodTo.onchange = () => {
+      state.period.to = periodTo.value;
+      persistPeriod();
+      clearDashboardCache();
       loadData(state.route);
     };
   }
@@ -1468,6 +1598,35 @@ function attachPageHandlers() {
     saveSettingsButton.onclick = () => {
       const form = el("settings-form");
       if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    };
+  }
+
+  const financeForm = el("finance-form");
+  if (financeForm) {
+    financeForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const submit = financeForm.querySelector("button[type=submit]");
+      const statusNode = el("finance-form-status");
+      setButtonLoading(submit, "Salvando…");
+      try {
+        await apiFetch("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify({
+            finance: {
+              laborCostPerDay: parseMoneyInput(el("labor-cost-day").value),
+              laborCostMonthly: parseMoneyInput(el("labor-cost-month").value),
+            },
+          }),
+        });
+        if (statusNode) statusNode.textContent = "Salvo.";
+        setStatus("Custos de trabalho salvos.", "success");
+        clearDashboardCache();
+      } catch (error) {
+        if (statusNode) statusNode.textContent = "";
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
     };
   }
 }

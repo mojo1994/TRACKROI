@@ -21,7 +21,17 @@ function ratio(numerator, denominator) {
   return numerator / denominator;
 }
 
-function buildDashboardFromAggregates({ aggregates, source = "all" }) {
+function computeLaborCostCents(finance, period) {
+  if (!finance) return 0;
+  const perDay = Math.max(0, Number(finance.laborCostPerDay) || 0);
+  const monthly = Math.max(0, Number(finance.laborCostMonthly) || 0);
+  const days = Math.max(1, Number(period?.days) || 30);
+  const dailyPart = perDay * days;
+  const monthlyPart = monthly ? monthly * (days / 30) : 0;
+  return Math.round((dailyPart + monthlyPart) * 100);
+}
+
+function buildDashboardFromAggregates({ aggregates, source = "all", period = null, finance = null }) {
   const {
     approvedCount = 0,
     approvedRevenueCents = 0,
@@ -34,9 +44,11 @@ function buildDashboardFromAggregates({ aggregates, source = "all" }) {
   } = aggregates || {};
 
   const netRevenueCents = approvedRevenueCents - refundCents;
-  const profitCents = netRevenueCents - spendCents;
+  const grossProfitCents = netRevenueCents - spendCents;
+  const laborCostCents = computeLaborCostCents(finance, period);
+  const operatingProfitCents = grossProfitCents - laborCostCents;
   const roas = ratio(netRevenueCents, spendCents);
-  const roi = ratio(profitCents, spendCents);
+  const roi = ratio(operatingProfitCents, spendCents);
   const cpa = ratio(spendCents / 100, approvedCount);
   const cvr = ratio(approvedCount, clickCount);
   const aov = ratio(approvedRevenueCents / 100, approvedCount);
@@ -49,20 +61,45 @@ function buildDashboardFromAggregates({ aggregates, source = "all" }) {
     { key: "approved", label: "Vendas Aprovadas", count: approvedCount },
   ];
 
+  const hideProfit = approvedRevenueCents === 0 && spendCents === 0;
   const hasData = clickCount > 0 || checkoutCount > 0 || approvedCount > 0 || spendCents > 0;
 
   return {
     ok: true,
     empty: !hasData,
-    filters: { source },
+    filters: { source, period: period ? { key: period.key, label: period.label, days: period.days, from: period.from, to: period.to } : null },
     summary: {
+      period: period ? { key: period.key, label: period.label, days: period.days, from: period.from, to: period.to } : null,
+      finance: {
+        adSpendCents: spendCents,
+        revenueCents: approvedRevenueCents,
+        refundCents,
+        grossProfitCents,
+        laborCostCents,
+        operatingProfitCents,
+        laborCostPerDay: Math.max(0, Number(finance?.laborCostPerDay) || 0),
+        laborCostMonthly: Math.max(0, Number(finance?.laborCostMonthly) || 0),
+        roas,
+        roi: hidableRatio(roi, hideProfit),
+        cpa,
+        cvr,
+        aov,
+        approved: approvedCount,
+        pending: pendingSales,
+        total: totalSales,
+        clicks: clickCount,
+        checkouts: checkoutCount,
+        days: period?.days || null,
+      },
       spendCents,
       revenueCents: approvedRevenueCents,
       netRevenueCents,
-      profitCents,
+      profitCents: operatingProfitCents,
+      grossProfitCents,
+      laborCostCents,
       refundCents,
       roas,
-      roi,
+      roi: hidableRatio(roi, hideProfit),
       cpa,
       cvr,
       aov,
@@ -75,7 +112,7 @@ function buildDashboardFromAggregates({ aggregates, source = "all" }) {
     cards: [
       { key: "spend", label: "Investimento", value: normalizeMoney(spendCents), tone: "neutral" },
       { key: "revenue", label: "Receita", value: normalizeMoney(approvedRevenueCents), tone: "neutral" },
-      { key: "profit", label: "Lucro", value: normalizeMoney(profitCents), tone: profitCents >= 0 ? "positive" : "negative" },
+      { key: "profit", label: "Lucro bruto", value: normalizeMoney(grossProfitCents), tone: grossProfitCents >= 0 ? "positive" : "negative" },
       { key: "roas", label: "ROAS", value: roas == null ? "—" : formatNumber(roas, 2), tone: roas != null && roas >= 1 ? "positive" : roas != null ? "negative" : "neutral" },
       { key: "roi", label: "ROI", value: roi == null ? "—" : `${formatNumber(roi * 100, 1)}%`, tone: roi != null && roi >= 0 ? "positive" : roi != null ? "negative" : "neutral" },
       { key: "cpa", label: "CPA", value: cpa == null ? "—" : normalizeMoney(cpa * 100), tone: "neutral" },
@@ -94,6 +131,11 @@ function buildDashboardFromAggregates({ aggregates, source = "all" }) {
       }),
     },
   };
+}
+
+function hidableRatio(value, hide) {
+  if (hide) return null;
+  return value == null ? null : value;
 }
 
 module.exports = {

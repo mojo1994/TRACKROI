@@ -54,9 +54,10 @@ function buildDashboard(state, query = {}) {
   const aov = ratio(revenueCents / 100, approvedSales);
   const funnel = [
     { key: "clicks", label: "Cliques", count: clickCount },
-    { key: "pageview", label: "Visita à Página", count: clickCount },
+    { key: "pageview", label: "Visitas na Página", count: clickCount },
     { key: "checkout", label: "Iniciar Checkout", count: checkoutCount },
-    { key: "approved", label: "Venda Aprovada", count: approvedSales },
+    { key: "sales", label: "Vendas Geradas", count: totalSales },
+    { key: "approved", label: "Vendas Aprovadas", count: approvedSales },
   ];
 
   const hasData = clickCount > 0 || checkoutCount > 0 || approvedSales > 0 || spendCents > 0;

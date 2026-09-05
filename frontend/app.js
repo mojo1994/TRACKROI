@@ -151,6 +151,16 @@ function updateNav() {
   document.querySelectorAll("[data-route]").forEach((item) => {
     item.classList.toggle("active", item.dataset.route === state.route);
   });
+  moveNavIndicator();
+}
+
+function moveNavIndicator() {
+  const nav = el("nav-links");
+  const indicator = el("nav-indicator");
+  const active = nav ? nav.querySelector(".nav-item.active") : null;
+  if (!nav || !indicator || !active) return;
+  indicator.style.height = `${active.offsetHeight}px`;
+  indicator.style.transform = `translateY(${active.offsetTop}px)`;
 }
 
 function applySidebarState() {
@@ -158,6 +168,8 @@ function applySidebarState() {
   if (!app) return;
   app.classList.toggle("sidebar-collapsed", !state.sidebarExpanded);
   localStorage.setItem("trackroi_sidebar_expanded", state.sidebarExpanded ? "1" : "0");
+  window.setTimeout(moveNavIndicator, 360);
+  window.setTimeout(moveNavIndicator, 640);
 }
 
 function updateSidebarUser() {
@@ -176,6 +188,14 @@ function mountSidebarIcons() {
     const key = node.dataset.icon;
     node.innerHTML = sidebarIcons[key] || "";
   });
+  document.querySelectorAll("#nav-links .nav-item").forEach((item, index) => {
+    item.style.setProperty("--i", index);
+  });
+  el("sidebar-toggle").onclick = () => {
+    state.sidebarExpanded = !state.sidebarExpanded;
+    applySidebarState();
+  };
+  window.addEventListener("resize", moveNavIndicator);
 }
 
 function renderMetricCards(cards) {
@@ -198,34 +218,150 @@ function renderMetricCards(cards) {
   `;
 }
 
-function funnelHtml(funnel) {
-  if (!funnel || funnel.empty) {
+function curveThrough(points) {
+  if (!points.length) return "";
+  let d = `M ${points[0][0].toFixed(1)} ${points[0][1].toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+function uvHalfs(stages, flat) {
+  const maxCount = Math.max(...stages.map((stage) => stage.count), 1);
+  const maxHalf = 102;
+  return stages.map((stage) => {
+    if (flat || !stage.count) return 6;
+    return Math.max(6, (stage.count / maxCount) * maxHalf);
+  });
+}
+
+function uvBuildD(halfs) {
+  const W = 800;
+  const H = 240;
+  const pad = 18;
+  const cy = H / 2;
+  const n = halfs.length;
+  const dx = n > 1 ? (W - pad * 2) / (n - 1) : 0;
+  const top = halfs.map((h, i) => [pad + i * dx, cy - h]);
+  const bottom = halfs.map((h, i) => [pad + i * dx, cy + h]).reverse();
+  return curveThrough(top) + ` L ${bottom[0][0].toFixed(1)} ${bottom[0][1].toFixed(1)}` + curveThrough(bottom) + " Z";
+}
+
+let uvSeq = 0;
+let lastFunnelCounts = null;
+let funnelMorphTimer = null;
+
+function uvFunnelHtml(funnel) {
+  if (!funnel || !funnel.stages || !funnel.stages.length) {
     return `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para começar.</div>`;
   }
-  const max = Math.max(...funnel.stages.map((stage) => stage.count), 1);
-  const colors = ["#7c5cff", "#d24dd8", "#ff6b9d", "#ff5c7a"];
-  return `
-    <div class="funnel-chart">
-      ${funnel.stages
+  uvSeq++;
+  const stages = funnel.stages;
+  const flat = funnel.empty || !stages.some((stage) => stage.count > 0);
+  const n = stages.length;
+  const W = 800;
+  const H = 240;
+  const pad = 18;
+  const cy = H / 2;
+  const dx = n > 1 ? (W - pad * 2) / (n - 1) : 0;
+  const xAt = (i) => pad + i * dx;
+  const halfs = uvHalfs(stages, flat);
+  const id = `uv-grad-${uvSeq}`;
+  const glowId = `uv-glow-${uvSeq}`;
+  const gradRef = `url(#${id})`;
+
+  const dividers = stages
+    .map((_, i) => `<line class="uv-divider" x1="${xAt(i).toFixed(1)}" y1="16" x2="${xAt(i).toFixed(1)}" y2="224" />`)
+    .join("");
+  const nodes = stages
+    .map((_, i) => `<circle class="uv-node" cx="${xAt(i).toFixed(1)}" cy="${cy}" r="3" />`)
+    .join("");
+
+  const nf = new Intl.NumberFormat("pt-BR");
+  const legendCols = `${(pad / W) * 100}%${stages.map(() => ` ${(dx / W) * 100}%`).join("")} ${(pad / W) * 100}%`;
+  const legend = `
+    <ol class="uv-legend" style="grid-template-columns:${legendCols}">
+      ${stages
         .map((stage, index) => {
-          const color = colors[Math.min(index, colors.length - 1)];
-          const width = Math.max(30, Math.round((stage.count / max) * 100));
+          const value = flat ? "—" : nf.format(stage.count);
+          const pct =
+            flat || stage.conversion == null
+              ? "—"
+              : `${new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 }).format(stage.conversion)}%`;
           return `
-            <div class="funnel-stage">
-              <div class="funnel-bar" style="width:${width}%; background: linear-gradient(90deg, ${color} 0%, ${color}cc 100%); box-shadow: 0 0 18px ${color}40;">
-                <span>${escapeHtml(stage.label)}</span>
-                <span class="funnel-count">${stage.count}</span>
-              </div>
-              <div class="funnel-meta">
-                <span>${stage.conversion == null ? "—" : `${percent(stage.conversion)} entre etapas`}</span>
-                <span>${stage.firstStageConversion == null ? "—" : `${percent(stage.firstStageConversion)} do total`}</span>
-              </div>
-            </div>
+            <li class="uv-item" style="grid-column-start:${index + 2}">
+              <span class="uv-name">${escapeHtml(stage.label)}</span>
+              <span class="uv-val">${value}</span>
+              <span class="uv-pct">${pct}</span>
+            </li>
           `;
         })
         .join("")}
+    </ol>
+  `;
+
+  return `
+    <div class="funnel-uv">
+      <div class="uv-stage">
+        <svg class="uv-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Funil de conversão">
+          <defs>
+            <linearGradient id="${id}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="#39ff88" />
+              <stop offset="1" stop-color="#8a2be2" />
+            </linearGradient>
+            <filter id="${glowId}" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="12" result="blur" />
+            </filter>
+          </defs>
+          ${dividers}
+          <path class="uv-glow" fill="${gradRef}" filter="url(#${glowId})"></path>
+          <path class="uv-main" fill="${gradRef}"></path>
+          <path class="uv-edge" stroke="${gradRef}"></path>
+          ${nodes}
+        </svg>
+        ${flat ? `<div class="uv-empty"><p>Nenhum dado ainda. Conecte suas ferramentas e o funil começa a se preencher sozinho.</p></div>` : ""}
+      </div>
+      ${legend}
     </div>
   `;
+}
+
+function animateFunnel(stages) {
+  if (!stages || !stages.length) return;
+  const target = uvHalfs(stages, stages.every((stage) => stage.count === 0));
+  const start = lastFunnelCounts && lastFunnelCounts.length === target.length ? lastFunnelCounts : target.map(() => 0);
+  const node = document.querySelector(".funnel-uv");
+  if (!node) {
+    lastFunnelCounts = target;
+    return;
+  }
+  const main = node.querySelector(".uv-main");
+  const glow = node.querySelector(".uv-glow");
+  const edge = node.querySelector(".uv-edge");
+  const t0 = performance.now();
+  const duration = 640;
+  if (funnelMorphTimer) cancelAnimationFrame(funnelMorphTimer);
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const halfs = target.map((value, i) => start[i] + (value - start[i]) * eased);
+    const d = uvBuildD(halfs);
+    if (main) main.setAttribute("d", d);
+    if (glow) glow.setAttribute("d", d);
+    if (edge) edge.setAttribute("d", d);
+    if (t < 1) funnelMorphTimer = requestAnimationFrame(step);
+    else lastFunnelCounts = target;
+  };
+  funnelMorphTimer = requestAnimationFrame(step);
 }
 
 function statusPill(status) {
@@ -333,10 +469,14 @@ function emptyDashboard() {
 
 function dashboardPage(data) {
   const hasData = data && data.empty === false;
+  const nf = new Intl.NumberFormat("pt-BR");
+  const funnelSub = data.funnel?.stages?.length
+    ? data.funnel.stages.map((stage) => `${nf.format(stage.count)} ${stage.label.toLowerCase()}`).join(" · ")
+    : "Cliques, visitas, checkouts e vendas.";
   const body = hasData
     ? `
       ${renderMetricCards(data.cards || [])}
-      ${sectionPanel("Funil de conversão", "Cliques, visitas, checkouts e vendas.", funnelHtml(data.funnel))}
+      ${sectionPanel("Funil de conversão", funnelSub, uvFunnelHtml(data.funnel))}
     `
     : emptyDashboard();
   return body;
@@ -360,11 +500,9 @@ function salesPage(data) {
 }
 
 function funnelPage(data) {
-  const hasData = data && data.empty === false;
-  const body = hasData
-    ? funnelHtml(data.funnel)
-    : `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para começar.</div>`;
-  return sectionPanel("Funil", "Acompanhe a conversão em cada etapa.", body);
+  const stages = data.funnel?.stages;
+  const body = stages && stages.length ? uvFunnelHtml(data.funnel) : uvFunnelHtml({ empty: true, stages: [] });
+  return sectionPanel("Funil", "Conversão por etapa, do clique à venda aprovada.", body);
 }
 
 function metricsSummary(summary) {
@@ -586,8 +724,37 @@ function logsPage(data) {
   `;
 }
 
+function renderSkeleton() {
+  const cards = Array.from({ length: 6 }, () => `
+    <div class="skeleton" style="min-height:132px; display:flex; flex-direction:column; justify-content:space-between; padding:20px 22px;">
+      <div class="skeleton-line" style="width:45%;"></div>
+      <div class="skeleton-line" style="width:70%; height:26px;"></div>
+      <div class="skeleton-line" style="width:30%;"></div>
+    </div>
+  `).join("");
+  const funnel = `
+    <div class="skeleton" style="min-height:320px; display:grid; gap:16px; padding:24px;">
+      <div class="skeleton-line" style="width:30%; height:16px;"></div>
+      <div class="skeleton-line" style="width:55%;"></div>
+      <div style="height:150px;"></div>
+      <div class="skeleton-line" style="width:80%;"></div>
+    </div>
+  `;
+  return `
+    <section class="cards-grid">${cards}</section>
+    <section class="panel">${funnel}</section>
+  `;
+}
+
 function renderPage() {
   const root = el("page-root");
+  if (state.loading && !state.data) {
+    pageTitle(state.route);
+    pageControls(state.route);
+    root.innerHTML = renderSkeleton();
+    attachPageHandlers();
+    return;
+  }
   const data = state.data || {};
   pageTitle(state.route);
   pageControls(state.route);
@@ -603,6 +770,9 @@ function renderPage() {
     logs: logsPage,
   };
   root.innerHTML = renderers[state.route](data);
+  if (state.route === "dashboard" || state.route === "funnel") {
+    animateFunnel(data.funnel?.stages || []);
+  }
   attachPageHandlers();
 }
 
@@ -720,6 +890,7 @@ function attachPageHandlers() {
 async function loadDataAndRender() {
   state.loading = true;
   setStatus("");
+  if (!state.data) renderPage();
   try {
     const [dashboard, sales, products, settings, integrations, auditLogs, webhookEvents] = await Promise.all([
       apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
@@ -826,14 +997,6 @@ async function bootstrap() {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem("trackroi_csrf");
     }
-  }
-
-  const sidebarToggle = el("sidebar-toggle");
-  if (sidebarToggle) {
-    sidebarToggle.addEventListener("click", () => {
-      state.sidebarExpanded = !state.sidebarExpanded;
-      applySidebarState();
-    });
   }
 
   showLogin();

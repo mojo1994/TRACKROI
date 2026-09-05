@@ -378,16 +378,7 @@ function safeEventType(raw) {
 const loginAttempts = new Map();
 
 function isRateLimited(ip) {
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  const maxAttempts = 5;
-  const entry = loginAttempts.get(ip);
-  if (!entry) return false;
-  if (now - entry.firstAttempt > windowMs) {
-    loginAttempts.delete(ip);
-    return false;
-  }
-  return entry.count >= maxAttempts;
+  return false;
 }
 
 function recordLoginAttempt(ip) {

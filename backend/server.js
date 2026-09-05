@@ -34,6 +34,8 @@ const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || FRONTEND_ORIGIN)
   .map((o) => o.trim())
   .filter(Boolean);
 
+const ALLOW_REGISTRATION = process.env.ALLOW_REGISTRATION === "true";
+
 function logEvent(level, message, details = {}) {
   const entry = {
     ts: new Date().toISOString(),
@@ -464,6 +466,10 @@ async function handleAuthStatus(req, res) {
 }
 
 async function handleAuthRegister(req, res) {
+  if (!ALLOW_REGISTRATION) {
+    send(res, 403, { ok: false, error: "Cadastro desativado. Use a conta de administrador fornecida." }, {}, req);
+    return;
+  }
   const ip = getClientIp(req);
   if (isRateLimited(ip)) {
     send(res, 429, { ok: false, error: "Muitas tentativas. Aguarde 15 minutos." }, {}, req);

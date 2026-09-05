@@ -1,0 +1,3843 @@
+﻿# ============================================================
+# TrackROI — Código Fonte Completo
+# Gerado em 2026-09-05 11:52
+# Uso: entregar a um modelo de IA para interpretar e evoluir o projeto
+# ============================================================
+
+
+# ============================================================
+# ARQUIVO: package.json (raiz)
+# CAMINHO: package.json
+# ============================================================
+{
+  "name": "trackroi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node start.js"
+  }
+}
+
+
+
+# ============================================================
+# ARQUIVO: Procfile
+# CAMINHO: Procfile
+# ============================================================
+web: node start.js
+
+
+
+# ============================================================
+# ARQUIVO: railway.json
+# CAMINHO: railway.json
+# ============================================================
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "node start.js",
+    "healthcheckPath": "/health",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+
+
+
+# ============================================================
+# ARQUIVO: start.js (servidor proxy raiz)
+# CAMINHO: start.js
+# ============================================================
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const { spawn } = require("child_process");
+
+const PORT = Number(process.env.PORT || 8080);
+const BACKEND_PORT = 4100;
+const FRONTEND_PORT = 5180;
+
+const backend = spawn("node", ["server.js"], {
+  cwd: path.join(__dirname, "backend"),
+  env: {
+    ...process.env,
+    PORT: String(BACKEND_PORT),
+    FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || `http://localhost:${PORT}`,
+    ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || `http://localhost:${PORT}`,
+  },
+  stdio: "inherit",
+});
+
+const frontend = spawn("node", ["server.js"], {
+  cwd: path.join(__dirname, "frontend"),
+  env: { ...process.env, PORT: String(FRONTEND_PORT), API_BASE: "" },
+  stdio: "inherit",
+});
+
+backend.on("exit", (code) => {
+  console.error(`Backend encerrado com cÃ³digo ${code}`);
+  process.exit(1);
+});
+
+frontend.on("exit", (code) => {
+  console.error(`Frontend encerrado com cÃ³digo ${code}`);
+  process.exit(1);
+});
+
+const server = http.createServer((req, res) => {
+  const target = req.url.startsWith("/api/") || req.url.startsWith("/health")
+    ? `http://localhost:${BACKEND_PORT}`
+    : `http://localhost:${FRONTEND_PORT}`;
+  const proxyReq = http.request(target + req.url, { method: req.method, headers: req.headers }, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+  proxyReq.on("error", (error) => {
+    console.error("Proxy error:", error.message);
+    res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Erro ao conectar ao serviÃ§o interno");
+  });
+  req.pipe(proxyReq);
+});
+
+server.listen(PORT, () => {
+  console.log(`TrackROI rodando em http://localhost:${PORT}`);
+});
+
+function shutdown(signal) {
+  console.log(`Encerrando (${signal})...`);
+  backend.kill("SIGTERM");
+  frontend.kill("SIGTERM");
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+
+
+# ============================================================
+# ARQUIVO: backend/package.json
+# CAMINHO: backend/package.json
+# ============================================================
+{
+  "name": "trackroi-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}
+
+
+
+# ============================================================
+# ARQUIVO: backend/server.js (API)
+# CAMINHO: backend/server.js
+# ============================================================
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { URL } = require("url");
+const {
+  readState,
+  writeState,
+  createEmptyState,
+  createSession,
+  pruneExpiredSessions,
+  getUserByToken,
+  verifyPassword,
+  createUserRecord,
+  appendAuditLog,
+  encryptSecret,
+  decryptSecret,
+} = require("./src/store");
+const { buildDashboard } = require("./src/metrics");
+
+const PORT = Number(process.env.PORT || 4100);
+const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN || `http://localhost:${PORT}`;
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5180";
+const csrfTokens = new Map();
+const META_API_VERSION = process.env.META_API_VERSION || "v22.0";
+const META_APP_ID = String(process.env.META_APP_ID || "").trim();
+const META_APP_SECRET = String(process.env.META_APP_SECRET || "").trim();
+const META_REDIRECT_URI = String(process.env.META_REDIRECT_URI || `${BACKEND_ORIGIN}/api/integrations/connect/meta/callback`).trim();
+const META_SCOPES = String(process.env.META_SCOPES || "ads_read,ads_management,pages_read_engagement,pages_show_list");
+
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || FRONTEND_ORIGIN)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const ALLOW_REGISTRATION = process.env.ALLOW_REGISTRATION === "true";
+
+function logEvent(level, message, details = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    level,
+    message,
+    ...details,
+  };
+  const line = `${entry.ts} [${level.toUpperCase()}] ${message}`;
+  if (level === "error") console.error(line, details);
+  else console.log(line, details);
+}
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Session-Token",
+  "Access-Control-Allow-Credentials": "true",
+};
+
+function corsHeadersFor(req) {
+  const origin = String(req.headers.origin || "").trim();
+  if (ALLOWED_ORIGINS.length && ALLOWED_ORIGINS.includes(origin)) {
+    return { ...CORS_HEADERS, "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+  }
+  return { ...CORS_HEADERS };
+}
+
+function send(res, statusCode, body, extraHeaders = {}, req = null) {
+  const payload = typeof body === "string" ? body : JSON.stringify(body);
+  const headers = req ? corsHeadersFor(req) : CORS_HEADERS;
+  res.writeHead(statusCode, {
+    "Content-Type": typeof body === "string" ? "text/plain; charset=utf-8" : "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(payload),
+    ...headers,
+    ...extraHeaders,
+  });
+  res.end(payload);
+}
+
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      if (!chunks.length) {
+        resolve(null);
+        return;
+      }
+      const raw = Buffer.concat(chunks).toString("utf8");
+      try {
+        const contentType = String(req.headers["content-type"] || "").toLowerCase();
+        if (contentType.includes("application/x-www-form-urlencoded")) {
+          resolve(Object.fromEntries(new URLSearchParams(raw).entries()));
+          return;
+        }
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function getPath(reqUrl) {
+  return new URL(reqUrl, "http://localhost").pathname;
+}
+
+function getQuery(reqUrl) {
+  const parsed = new URL(reqUrl, "http://localhost");
+  return Object.fromEntries(parsed.searchParams.entries());
+}
+
+function getQueryParam(reqUrl, name) {
+  return new URL(reqUrl, "http://localhost").searchParams.get(name);
+}
+
+function getAuthToken(req) {
+  const auth = String(req.headers.authorization || "");
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  return String(req.headers["x-session-token"] || "").trim();
+}
+
+async function requireAuth(req) {
+  const state = await readState();
+  const token = getAuthToken(req);
+  const user = token ? getUserByToken(state, token) : null;
+  return { state, token, user };
+}
+
+async function saveStateWithAudit(state, entry) {
+  appendAuditLog(state, entry);
+  await writeState(state);
+}
+
+function connectionTokenFromQuery(reqUrl) {
+  return String(getQueryParam(reqUrl, "token") || "").trim();
+}
+
+function buildMetaAuthorizationUrl(stateToken) {
+  const params = new URLSearchParams({
+    client_id: META_APP_ID,
+    redirect_uri: META_REDIRECT_URI,
+    response_type: "code",
+    scope: META_SCOPES,
+    state: stateToken,
+  });
+  return `https://www.facebook.com/${META_API_VERSION}/dialog/oauth?${params.toString()}`;
+}
+
+function renderPerfectPayConnectPage({ token, error = "" }) {
+  const safeError = error ? `<div class="connect-error">${escapeHtml(error)}</div>` : "";
+  return `<!doctype html>
+  <html lang="pt-BR">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Conectar Perfect Pay</title>
+      <style>
+        :root { color-scheme: dark; --bg:#080b0f; --panel:#121820; --border:#27313d; --text:#f5f7fa; --muted:#93a0af; --radius:6px; }
+        * { box-sizing: border-box; }
+        body { margin:0; min-height:100vh; display:grid; place-items:center; background:linear-gradient(180deg,#07090c 0%,#0b0f14 100%); color:var(--text); font-family: Inter, Segoe UI, Arial, sans-serif; padding:24px; }
+        .card { width:min(540px,100%); border:1px solid var(--border); border-radius:12px; background:rgba(18,24,32,.98); padding:24px; box-shadow:0 22px 60px rgba(0,0,0,.35); }
+        h1 { margin:0 0 10px; font-size:28px; }
+        p { color:var(--muted); line-height:1.5; }
+        form { display:grid; gap:14px; margin-top:18px; }
+        label { display:grid; gap:6px; font-size:12px; color:var(--muted); }
+        input { height:42px; border-radius:6px; border:1px solid var(--border); background:#10151b; color:var(--text); padding:0 14px; }
+        button { height:42px; border-radius:6px; border:1px solid var(--border); background:#10151b; color:var(--text); cursor:pointer; }
+        .connect-error { margin-top:14px; padding:12px 14px; border-radius:6px; border:1px solid rgba(230,107,107,.25); background:rgba(230,107,107,.08); color:#ffb3b3; }
+        .note { margin-top:14px; font-size:13px; color:var(--muted); }
+        .token { word-break:break-all; font-size:12px; color:var(--muted); }
+      </style>
+    </head>
+    <body>
+      <section class="card">
+        <h1>Conectar Perfect Pay</h1>
+        <p>Este atalho usa a autenticaÃ§Ã£o oficial por e-mail e senha da API da Perfect Pay para gerar o token no backend. O webhook continua manual e pode ser configurado depois.</p>
+        <form method="post" action="/api/integrations/connect/perfectpay">
+          <input type="hidden" name="token" value="${escapeHtml(token)}" />
+          <label><span>E-mail da Perfect Pay</span><input name="email" type="email" autocomplete="username" required /></label>
+          <label><span>Senha</span><input name="password" type="password" autocomplete="current-password" required /></label>
+          <button type="submit">Conectar Perfect Pay</button>
+        </form>
+        ${safeError}
+        <div class="note">Depois de conectar, vocÃª ainda pode ajustar o webhook manualmente na dashboard.</div>
+      </section>
+    </body>
+  </html>`;
+}
+
+function redirectConnected(res, provider) {
+  const url = new URL(`${FRONTEND_ORIGIN}/index.html`);
+  url.hash = "#connections";
+  url.searchParams.set("connected", provider);
+  res.writeHead(302, {
+    Location: url.toString(),
+    ...CORS_HEADERS,
+  });
+  res.end();
+}
+
+async function exchangeMetaCode(code) {
+  if (!META_APP_ID || !META_APP_SECRET) {
+    throw new Error("Meta app credentials are not configured");
+  }
+
+  const tokenUrl = new URL(`https://graph.facebook.com/${META_API_VERSION}/oauth/access_token`);
+  tokenUrl.searchParams.set("client_id", META_APP_ID);
+  tokenUrl.searchParams.set("client_secret", META_APP_SECRET);
+  tokenUrl.searchParams.set("redirect_uri", META_REDIRECT_URI);
+  tokenUrl.searchParams.set("code", code);
+
+  const response = await fetch(tokenUrl);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error?.message || "Failed to exchange Meta code");
+  }
+  return body;
+}
+
+async function fetchMetaProfile(accessToken) {
+  const profileUrl = new URL(`https://graph.facebook.com/${META_API_VERSION}/me`);
+  profileUrl.searchParams.set("fields", "id,name");
+  profileUrl.searchParams.set("access_token", accessToken);
+  const response = await fetch(profileUrl);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return null;
+  }
+  return body;
+}
+
+async function handleMetaConnectStart(req, res, query) {
+  const token = connectionTokenFromQuery(req.url);
+  if (!token) {
+    send(res, 401, { ok: false, error: "Token de sessÃ£o ausente" }, {}, req);
+    return;
+  }
+  if (!META_APP_ID || !META_APP_SECRET) {
+    send(res, 400, {
+      ok: false,
+      error: "Meta app credentials are not configured",
+      hint: "Defina META_APP_ID e META_APP_SECRET no backend.",
+    }, {}, req);
+    return;
+  }
+  const authUrl = buildMetaAuthorizationUrl(token);
+  res.writeHead(302, { Location: authUrl, ...corsHeadersFor(req) });
+  res.end();
+}
+
+async function handleMetaConnectCallback(req, res, query) {
+  const token = String(query.state || "").trim();
+  const code = String(query.code || "").trim();
+  if (!token || !code) {
+    send(res, 400, { ok: false, error: "Missing OAuth state or code" }, {}, req);
+    return;
+  }
+
+  const state = await readState();
+  const user = getUserByToken(state, token);
+  if (!user) {
+    send(res, 401, { ok: false, error: "Invalid session token" }, {}, req);
+    return;
+  }
+
+  const exchange = await exchangeMetaCode(code);
+  const accessToken = String(exchange.access_token || "").trim();
+  if (!accessToken) {
+    send(res, 502, { ok: false, error: "Meta authorization did not return an access token" }, {}, req);
+    return;
+  }
+
+  const profile = await fetchMetaProfile(accessToken);
+  state.integrations.meta = {
+    ...state.integrations.meta,
+    status: "connected",
+    tokenStatus: "connected",
+    accessToken: encryptSecret(accessToken),
+    lastSyncAt: new Date().toISOString(),
+    connectedAccount: profile?.name || state.integrations.meta.connectedAccount || "Meta user",
+    errors: [],
+  };
+  appendAuditLog(state, {
+    actorUserId: user.id,
+    action: "integration.meta.oauth_connected",
+    resourceType: "integration",
+    resourceId: "meta",
+  });
+  await writeState(state);
+  redirectConnected(res, "meta");
+}
+
+async function handlePerfectPayConnectStart(req, res) {
+  const token = connectionTokenFromQuery(req.url);
+  if (!token) {
+    send(res, 401, { ok: false, error: "Token de sessÃ£o ausente" }, {}, req);
+    return;
+  }
+  send(res, 200, renderPerfectPayConnectPage({ token }), {
+    "Content-Type": "text/html; charset=utf-8",
+  }, req);
+}
+
+async function handlePerfectPayConnectSubmit(req, res) {
+  const body = await parseBody(req);
+  const email = String(body?.email || "").trim();
+  const password = String(body?.password || "");
+  const token = String(body?.token || "").trim() || connectionTokenFromQuery(req.url);
+
+  if (!token) {
+    send(res, 401, { ok: false, error: "Token de sessÃ£o ausente" }, {}, req);
+    return;
+  }
+  if (!email || !password) {
+    send(res, 400, renderPerfectPayConnectPage({ token, error: "Preencha e-mail e senha para continuar." }), {
+      "Content-Type": "text/html; charset=utf-8",
+    }, req);
+    return;
+  }
+
+  const state = await readState();
+  const user = getUserByToken(state, token);
+  if (!user) {
+    send(res, 401, { ok: false, error: "SessÃ£o invÃ¡lida" }, {}, req);
+    return;
+  }
+
+  const response = await fetch("https://app.perfectpay.com.br/api/auth/login", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload?.message || payload?.error || "Falha ao autenticar na Perfect Pay";
+    send(res, 400, renderPerfectPayConnectPage({ token, error: message }), {
+      "Content-Type": "text/html; charset=utf-8",
+    }, req);
+    return;
+  }
+
+  const accessToken = String(payload.access_token || payload.token || "").trim();
+  if (!accessToken) {
+    send(res, 502, renderPerfectPayConnectPage({ token, error: "A Perfect Pay nÃ£o retornou um token de acesso." }), {
+      "Content-Type": "text/html; charset=utf-8",
+    }, req);
+    return;
+  }
+
+  state.integrations.perfectPay = {
+    ...state.integrations.perfectPay,
+    status: "connected",
+    apiStatus: "connected",
+    accessToken: encryptSecret(accessToken),
+    retryStatus: "idle",
+    errors: [],
+  };
+  appendAuditLog(state, {
+    actorUserId: user.id,
+    action: "integration.perfectpay.connected",
+    resourceType: "integration",
+    resourceId: "perfectpay",
+  });
+  await writeState(state);
+  redirectConnected(res, "perfectpay");
+}
+
+function safeEventType(raw) {
+  return String(raw || "").trim().toLowerCase();
+}
+
+const loginAttempts = new Map();
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxAttempts = 5;
+  const entry = loginAttempts.get(ip);
+  if (!entry) return false;
+  if (now - entry.firstAttempt > windowMs) {
+    loginAttempts.delete(ip);
+    return false;
+  }
+  return entry.count >= maxAttempts;
+}
+
+function recordLoginAttempt(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const entry = loginAttempts.get(ip);
+  if (!entry || now - entry.firstAttempt > windowMs) {
+    loginAttempts.set(ip, { firstAttempt: now, count: 1 });
+    return;
+  }
+  entry.count += 1;
+}
+
+function resetLoginAttempts(ip) {
+  loginAttempts.delete(ip);
+}
+
+function getClientIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+}
+
+function createCsrfToken(userId) {
+  const token = crypto.randomBytes(24).toString("hex");
+  csrfTokens.set(token, { userId, createdAt: Date.now() });
+  return token;
+}
+
+function verifyCsrfToken(token, userId) {
+  if (!token) return false;
+  const entry = csrfTokens.get(token);
+  if (!entry) return false;
+  if (entry.userId !== userId) return false;
+  if (Date.now() - entry.createdAt > 24 * 60 * 60 * 1000) {
+    csrfTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
+async function handleAuthLogin(req, res) {
+  const ip = getClientIp(req);
+  if (isRateLimited(ip)) {
+    send(res, 429, { ok: false, error: "Muitas tentativas de login. Aguarde 15 minutos." }, {}, req);
+    return;
+  }
+  const body = await parseBody(req);
+  const email = String(body?.email || "").trim().toLowerCase();
+  const password = String(body?.password || "");
+  const state = await readState();
+  const user = state.users.find((item) => item.email === email);
+  if (!user || !verifyPassword(password, user.password)) {
+    recordLoginAttempt(ip);
+    send(res, 401, { ok: false, error: "Credenciais invÃ¡lidas" }, {}, req);
+    return;
+  }
+
+  resetLoginAttempts(ip);
+  pruneExpiredSessions(state);
+  const session = createSession(user.id);
+  state.sessions.push(session);
+  appendAuditLog(state, { actorUserId: user.id, action: "auth.login", resourceType: "session", resourceId: session.id });
+  await writeState(state);
+
+  send(res, 200, {
+    ok: true,
+    token: session.token,
+    user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    csrfToken: createCsrfToken(user.id),
+    expiresAt: session.expiresAt,
+  }, {}, req);
+}
+
+async function handleAuthStatus(req, res) {
+  const state = await readState();
+  send(res, 200, { ok: true, hasUsers: state.users.length > 0 }, {}, req);
+}
+
+async function handleAuthRegister(req, res) {
+  if (!ALLOW_REGISTRATION) {
+    send(res, 403, { ok: false, error: "Cadastro desativado. Use a conta de administrador fornecida." }, {}, req);
+    return;
+  }
+  const ip = getClientIp(req);
+  if (isRateLimited(ip)) {
+    send(res, 429, { ok: false, error: "Muitas tentativas. Aguarde 15 minutos." }, {}, req);
+    return;
+  }
+  const body = await parseBody(req);
+  const name = String(body?.name || "").trim();
+  const email = String(body?.email || "").trim().toLowerCase();
+  const password = String(body?.password || "");
+
+  if (!name) {
+    send(res, 400, { ok: false, error: "Informe seu nome" }, {}, req);
+    return;
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    send(res, 400, { ok: false, error: "Informe um e-mail vÃ¡lido" }, {}, req);
+    return;
+  }
+  if (password.length < 6) {
+    send(res, 400, { ok: false, error: "A senha deve ter pelo menos 6 caracteres" }, {}, req);
+    return;
+  }
+
+  const state = await readState();
+  if (state.users.some((u) => u.email === email)) {
+    send(res, 409, { ok: false, error: "Este e-mail jÃ¡ estÃ¡ cadastrado" }, {}, req);
+    return;
+  }
+
+  const role = state.users.length === 0 ? "admin" : "member";
+  const user = createUserRecord({ name, email, password, role });
+  state.users.push(user);
+  pruneExpiredSessions(state);
+  const session = createSession(user.id);
+  state.sessions.push(session);
+  appendAuditLog(state, { actorUserId: user.id, action: "auth.register", resourceType: "user", resourceId: user.id });
+  appendAuditLog(state, { actorUserId: user.id, action: "auth.login", resourceType: "session", resourceId: session.id });
+  await writeState(state);
+
+  send(res, 201, {
+    ok: true,
+    token: session.token,
+    user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    csrfToken: createCsrfToken(user.id),
+    expiresAt: session.expiresAt,
+  }, {}, req);
+}
+
+async function handleAuthMe(req, res) {
+  const { user } = await requireAuth(req);
+  if (!user) {
+    send(res, 401, { ok: false, error: "NÃ£o autenticado" }, {}, req);
+    return;
+  }
+  send(res, 200, {
+    ok: true,
+    user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    csrfToken: createCsrfToken(user.id),
+  }, {}, req);
+}
+
+async function handleAuthLogout(req, res) {
+  const { state, token, user } = await requireAuth(req);
+  if (!token || !user) {
+    send(res, 200, { ok: true }, {}, req);
+    return;
+  }
+  state.sessions = state.sessions.filter((session) => session.token !== token);
+  pruneExpiredSessions(state);
+  appendAuditLog(state, { actorUserId: user.id, action: "auth.logout", resourceType: "session", resourceId: token });
+  await writeState(state);
+  send(res, 200, { ok: true }, {}, req);
+}
+
+function verifyPerfectPaySignature(secret, rawBody, signatureHeader) {
+  if (!secret || !rawBody || !signatureHeader) return false;
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const received = String(signatureHeader).trim();
+  if (!received) return false;
+  const receivedBuffer = Buffer.from(received, "hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
+async function handlePerfectPayWebhook(req, res) {
+  const body = await parseBody(req);
+  if (!body || typeof body !== "object") {
+    send(res, 400, { ok: false, error: "Missing JSON payload" }, {}, req);
+    return;
+  }
+
+  const state = await readState();
+  const secret = state.integrations.perfectPay.webhookSecret;
+  if (secret) {
+    const signature = String(req.headers["x-perfectpay-signature"] || req.headers["perfectpay-signature"] || "").trim();
+    if (!verifyPerfectPaySignature(secret, JSON.stringify(body), signature)) {
+      appendAuditLog(state, {
+        action: "webhook.invalid_signature",
+        resourceType: "webhook_event",
+        resourceId: makeId("we"),
+        metadata: { reason: "signature_mismatch" },
+      });
+      await writeState(state);
+      send(res, 401, { ok: false, error: "Invalid signature" }, {}, req);
+      return;
+    }
+  }
+
+  const transactionId = String(body.transaction_id || body.transactionId || body.id || "").trim();
+  const eventType = safeEventType(body.event_type || body.eventType || body.event);
+  const amountCents = Number(body.amount_cents ?? body.amountCents ?? 0);
+  const currency = String(body.currency || "BRL").toUpperCase();
+  const trackroiClickId = String(body.trackroi_click_id || body.click_id || "").trim() || null;
+
+  if (!transactionId || !eventType) {
+    send(res, 400, { ok: false, error: "transaction_id and event_type are required" }, {}, req);
+    return;
+  }
+
+  const supportedEvents = new Set(["approved", "pending", "refunded", "chargeback", "cancelled", "rejected"]);
+  if (!supportedEvents.has(eventType)) {
+    send(res, 400, { ok: false, error: "Unsupported event_type", supported_events: Array.from(supportedEvents) }, {}, req);
+    return;
+  }
+
+  const gateway = "perfectpay";
+  const idempotencyKey = `${gateway}:${transactionId}:${eventType}`;
+  const receivedAt = new Date().toISOString();
+  const duplicate = state.webhookEvents.some((event) => event.idempotencyKey === idempotencyKey);
+  if (duplicate) {
+    send(res, 200, { ok: true, duplicate: true, idempotency_key: idempotencyKey }, {}, req);
+    return;
+  }
+
+  const webhookEvent = {
+    id: makeId("we"),
+    gateway,
+    transactionId,
+    eventType,
+    idempotencyKey,
+    receivedAt,
+    status: "received",
+    rawPayload: body,
+  };
+  state.webhookEvents.push(webhookEvent);
+  state.integrations.perfectPay.lastReceivedEventAt = receivedAt;
+
+  let sale = state.sales.find((item) => item.gateway === gateway && item.gatewayTransactionId === transactionId);
+  if (!sale) {
+    sale = {
+      id: makeId("sa"),
+      gateway,
+      gatewayTransactionId: transactionId,
+      eventType,
+      status: eventType,
+      amountCents: Number.isFinite(amountCents) ? amountCents : 0,
+      currency,
+      trackroiClickId,
+      source: trackroiClickId ? "direct" : "meta",
+      createdAt: receivedAt,
+      updatedAt: receivedAt,
+    };
+    state.sales.push(sale);
+  } else {
+    sale.status = eventType;
+    sale.eventType = eventType;
+    sale.amountCents = Number.isFinite(amountCents) ? amountCents : sale.amountCents;
+    sale.currency = currency || sale.currency;
+    sale.trackroiClickId = trackroiClickId || sale.trackroiClickId;
+    sale.updatedAt = receivedAt;
+  }
+
+  appendAuditLog(state, {
+    action: "webhook.received",
+    resourceType: "webhook_event",
+    resourceId: webhookEvent.id,
+    metadata: { eventType, transactionId, duplicate: false },
+  });
+
+  if (eventType === "approved") {
+    appendAuditLog(state, {
+      action: "sale.approved",
+      resourceType: "sale",
+      resourceId: sale.id,
+      metadata: { amountCents, currency },
+    });
+  }
+
+  await writeState(state);
+  send(res, 200, { ok: true, duplicate: false, idempotency_key: idempotencyKey, sale_status: eventType }, {}, req);
+}
+
+function paginate(items, query = {}) {
+  const page = Math.max(1, Number(query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(query.limit) || 50));
+  const total = items.length;
+  const start = (page - 1) * limit;
+  const pageItems = items.slice(start, start + limit);
+  return {
+    items: pageItems,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  };
+}
+
+function sanitizeIntegrations(integrations) {
+  const meta = { ...(integrations.meta || {}) };
+  delete meta.accessToken;
+  const perfectPay = { ...(integrations.perfectPay || {}) };
+  delete perfectPay.accessToken;
+  delete perfectPay.webhookSecret;
+  return { meta, perfectPay };
+}
+
+async function main() {
+  await createEmptyState();
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (req.method === "OPTIONS") {
+        send(res, 204, "", {}, req);
+        return;
+      }
+
+      const path = getPath(req.url);
+      const query = getQuery(req.url);
+
+      if (req.method === "GET" && path === "/health") {
+        let storageOk = true;
+        try {
+          await readState();
+        } catch {
+          storageOk = false;
+        }
+        send(res, storageOk ? 200 : 503, {
+          ok: storageOk,
+          service: "trackroi-backend",
+          port: PORT,
+          uptime: Math.round(process.uptime()),
+        }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/integrations/connect/meta") {
+        await handleMetaConnectStart(req, res, query);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/integrations/connect/meta/callback") {
+        await handleMetaConnectCallback(req, res, query);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/integrations/connect/perfectpay") {
+        await handlePerfectPayConnectStart(req, res, query);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/integrations/connect/perfectpay") {
+        await handlePerfectPayConnectSubmit(req, res, query);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/auth/login") {
+        await handleAuthLogin(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/auth/register") {
+        await handleAuthRegister(req, res);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/auth/status") {
+        await handleAuthStatus(req, res);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/auth/me") {
+        await handleAuthMe(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/auth/logout") {
+        await handleAuthLogout(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/webhooks/perfectpay") {
+        await handlePerfectPayWebhook(req, res);
+        return;
+      }
+
+      const { state, user } = await requireAuth(req);
+      if (!user) {
+        send(res, 401, { ok: false, error: "NÃ£o autenticado" }, {}, req);
+        return;
+      }
+
+      if (req.method !== "GET") {
+        const csrfHeader = String(req.headers["x-csrf-token"] || "").trim();
+        if (!verifyCsrfToken(csrfHeader, user.id)) {
+          send(res, 403, { ok: false, error: "Invalid CSRF token" }, {}, req);
+          return;
+        }
+      }
+
+      if (req.method === "GET" && path === "/api/dashboard") {
+        send(res, 200, buildDashboard(state, query), {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/metrics") {
+        const dashboard = buildDashboard(state, query);
+        send(res, 200, { ok: true, metrics: dashboard.summary, cards: dashboard.cards, funnel: dashboard.funnel }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/sales") {
+        const paginated = paginate(state.sales.slice().reverse(), query);
+        send(res, 200, { ok: true, ...paginated }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/clicks") {
+        const paginated = paginate(state.clicks.slice().reverse(), query);
+        send(res, 200, { ok: true, ...paginated }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/checkouts") {
+        const paginated = paginate(state.checkouts.slice().reverse(), query);
+        send(res, 200, { ok: true, ...paginated }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/products") {
+        send(res, 200, { ok: true, items: state.products }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/products") {
+        const body = await parseBody(req);
+        const now = new Date().toISOString();
+        const product = {
+          id: makeId("pr"),
+          name: String(body?.name || "").trim(),
+          priceCents: Number(body?.priceCents || 0),
+          createdAt: now,
+        };
+        if (!product.name) {
+          send(res, 400, { ok: false, error: "name is required" }, {}, req);
+          return;
+        }
+        state.products.push(product);
+        appendAuditLog(state, { actorUserId: user.id, action: "product.create", resourceType: "product", resourceId: product.id });
+        await writeState(state);
+        send(res, 201, { ok: true, item: product }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/settings") {
+        send(res, 200, { ok: true, settings: state.settings }, {}, req);
+        return;
+      }
+
+      if (req.method === "PUT" && path === "/api/settings") {
+        const body = await parseBody(req);
+        state.settings = {
+          ...state.settings,
+          ...body,
+          general: { ...state.settings.general, ...(body?.general || {}) },
+          appearance: { ...state.settings.appearance, ...(body?.appearance || {}) },
+          dashboard: { ...state.settings.dashboard, ...(body?.dashboard || {}) },
+        };
+        appendAuditLog(state, { actorUserId: user.id, action: "settings.update", resourceType: "settings", resourceId: "global" });
+        await writeState(state);
+        send(res, 200, { ok: true, settings: state.settings }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/integrations") {
+        const integrations = sanitizeIntegrations(state.integrations);
+        send(res, 200, { ok: true, items: integrations }, {}, req);
+        return;
+      }
+
+      if (req.method === "PUT" && path === "/api/integrations/meta") {
+        const body = await parseBody(req);
+        const allowedFields = ["status", "adAccountId"];
+        const sanitized = {};
+        for (const field of allowedFields) {
+          if (body?.[field] !== undefined) sanitized[field] = body[field];
+        }
+        state.integrations.meta = {
+          ...state.integrations.meta,
+          ...sanitized,
+        };
+        appendAuditLog(state, { actorUserId: user.id, action: "integration.meta.update", resourceType: "integration", resourceId: "meta" });
+        await writeState(state);
+        send(res, 200, { ok: true, item: sanitizeIntegrations(state.integrations).meta }, {}, req);
+        return;
+      }
+
+      if (req.method === "PUT" && path === "/api/integrations/perfectpay") {
+        const body = await parseBody(req);
+        const allowedFields = ["status", "webhookUrl"];
+        const sanitized = {};
+        for (const field of allowedFields) {
+          if (body?.[field] !== undefined) sanitized[field] = body[field];
+        }
+        state.integrations.perfectPay = {
+          ...state.integrations.perfectPay,
+          ...sanitized,
+        };
+        appendAuditLog(state, { actorUserId: user.id, action: "integration.perfectpay.update", resourceType: "integration", resourceId: "perfectpay" });
+        await writeState(state);
+        send(res, 200, { ok: true, item: sanitizeIntegrations(state.integrations).perfectPay }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/webhook-events") {
+        const paginated = paginate(state.webhookEvents.slice().reverse(), query);
+        send(res, 200, { ok: true, ...paginated }, {}, req);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/audit-logs") {
+        const paginated = paginate(state.auditLogs.slice().reverse(), query);
+        send(res, 200, { ok: true, ...paginated }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/dev/click") {
+        const body = await parseBody(req);
+        const now = new Date().toISOString();
+        const click = {
+          id: makeId("cl"),
+          trackroiClickId: String(body?.trackroi_click_id || makeId("trk")),
+          source: String(body?.source || "direct"),
+          campaignId: body?.campaign_id || null,
+          adsetId: body?.adset_id || null,
+          adId: body?.ad_id || null,
+          landingPage: body?.landing_page || "/",
+          referrer: body?.referrer || null,
+          fbclid: body?.fbclid || null,
+          createdAt: now,
+        };
+        state.clicks.push(click);
+        appendAuditLog(state, { actorUserId: user.id, action: "click.create", resourceType: "click", resourceId: click.id });
+        await writeState(state);
+        send(res, 201, { ok: true, item: click }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/dev/checkout") {
+        const body = await parseBody(req);
+        const now = new Date().toISOString();
+        const checkout = {
+          id: makeId("co"),
+          trackroiClickId: String(body?.trackroi_click_id || ""),
+          status: String(body?.status || "initiated"),
+          createdAt: now,
+        };
+        state.checkouts.push(checkout);
+        appendAuditLog(state, { actorUserId: user.id, action: "checkout.create", resourceType: "checkout", resourceId: checkout.id });
+        await writeState(state);
+        send(res, 201, { ok: true, item: checkout }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/dev/spend") {
+        const body = await parseBody(req);
+        const now = new Date().toISOString();
+        const spend = {
+          id: makeId("sp"),
+          source: String(body?.source || "meta"),
+          amountCents: Number(body?.amountCents || 0),
+          currency: String(body?.currency || "BRL"),
+          createdAt: now,
+        };
+        state.advertisingSpend.push(spend);
+        appendAuditLog(state, { actorUserId: user.id, action: "spend.create", resourceType: "spend", resourceId: spend.id });
+        await writeState(state);
+        send(res, 201, { ok: true, item: spend }, {}, req);
+        return;
+      }
+
+      send(res, 404, { ok: false, error: "Not found" }, {}, req);
+    } catch (error) {
+      logEvent("error", "Unhandled request error", { error: error.message });
+      send(res, 500, { ok: false, error: error.message || "Internal server error" }, {}, req);
+    }
+  });
+
+  const certFile = process.env.TLS_CERT || path.join(__dirname, "certs", "cert.pem");
+  const keyFile = process.env.TLS_KEY || path.join(__dirname, "certs", "key.pem");
+  const hasTls = process.env.ENABLE_TLS === "true" && fs.existsSync(certFile) && fs.existsSync(keyFile);
+  const protocol = hasTls ? "https" : "http";
+
+  const requestHandler = (req, res) => server.emit("request", req, res);
+  const onListen = () => logEvent("info", "Backend listening", { protocol, port: PORT });
+  const onError = (error) => {
+    if (error.code === "EADDRINUSE") {
+      logEvent("error", `A porta ${PORT} jÃ¡ estÃ¡ em uso`, {
+        hint: "Feche o processo anterior ou mude a variÃ¡vel PORT no backend/.env",
+      });
+      process.exit(1);
+    }
+    throw error;
+  };
+
+  if (hasTls) {
+    const tlsServer = https.createServer(
+      { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) },
+      requestHandler
+    );
+    tlsServer.once("error", onError);
+    tlsServer.listen(PORT, onListen);
+  } else {
+    server.once("error", onError);
+    server.listen(PORT, onListen);
+  }
+
+  function shutdown(signal) {
+    logEvent("info", "Backend encerrado", { signal });
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  }
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+
+
+
+# ============================================================
+# ARQUIVO: backend/src/store.js (persistência)
+# CAMINHO: backend/src/store.js
+# ============================================================
+const fs = require("fs/promises");
+const path = require("path");
+const crypto = require("crypto");
+
+const DATA_DIR = path.join(__dirname, "..", "data");
+const STATE_FILE = path.join(DATA_DIR, "state.json");
+let writeQueue = Promise.resolve();
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
+
+function encryptSecret(value) {
+  if (!value) return value;
+  if (!ENCRYPTION_KEY) return value;
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(ENCRYPTION_KEY, "base64"), iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString("base64")}:${tag.toString("base64")}:${encrypted.toString("base64")}`;
+}
+
+function decryptSecret(value) {
+  if (!value || typeof value !== "string") return value;
+  if (!value.startsWith("enc:v1:")) return value;
+  const [, , ivB64, tagB64, dataB64] = value.split(":");
+  if (!ENCRYPTION_KEY) return null;
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", Buffer.from(ENCRYPTION_KEY, "base64"), Buffer.from(ivB64, "base64"));
+    decipher.setAuthTag(Buffer.from(tagB64, "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(dataB64, "base64")), decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function hashPassword(password, salt) {
+  return crypto.pbkdf2Sync(String(password), salt, 120000, 64, "sha512").toString("hex");
+}
+
+function createPasswordRecord(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  return { salt, hash: hashPassword(password, salt) };
+}
+
+function verifyPassword(password, record) {
+  if (!record?.salt || !record?.hash) return false;
+  return crypto.timingSafeEqual(
+    Buffer.from(hashPassword(password, record.salt), "hex"),
+    Buffer.from(record.hash, "hex"),
+  );
+}
+
+function createDefaultUser() {
+  const email = String(process.env.ADMIN_EMAIL || "admin@trackroi.local").toLowerCase();
+  const password = String(process.env.ADMIN_PASSWORD || "TrackROI!2026");
+  const record = createPasswordRecord(password);
+  return {
+    id: "user_admin",
+    name: "Administrador",
+    email,
+    role: "admin",
+    password: record,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createUserRecord({ name, email, password, role = "admin" }) {
+  return {
+    id: `user_${crypto.randomUUID()}`,
+    name: String(name || "").trim(),
+    email: String(email || "").trim().toLowerCase(),
+    role,
+    password: createPasswordRecord(password),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createEmptyState() {
+  return {
+    users: [createDefaultUser()],
+    sessions: [],
+    clicks: [],
+    checkouts: [],
+    sales: [],
+    webhookEvents: [],
+    advertisingSpend: [],
+    auditLogs: [],
+    products: [],
+    settings: {
+      general: {
+        companyName: "TrackROI",
+        timezone: "America/Sao_Paulo",
+        currency: "BRL",
+        locale: "pt-BR",
+      },
+      appearance: {
+        theme: "dark-hybrid",
+      },
+      dashboard: {
+        layout: ["spend", "revenue", "profit", "roas", "roi", "cpa"],
+      },
+    },
+    integrations: {
+      meta: {
+        status: "not_connected",
+        connectedAccount: null,
+        lastSyncAt: null,
+        tokenStatus: "missing",
+        accessToken: null,
+        errors: [],
+      },
+      perfectPay: {
+        status: "not_connected",
+        webhookStatus: "not_configured",
+        apiStatus: "not_configured",
+        lastReceivedEventAt: null,
+        failedEvents: 0,
+        retryStatus: "idle",
+        webhookUrl: "http://localhost:4000/api/webhooks/perfectpay",
+        accessToken: null,
+      },
+    },
+  };
+}
+
+function normalizeState(input) {
+  const defaults = createEmptyState();
+  const state = input && typeof input === "object" ? input : {};
+  return {
+    ...defaults,
+    ...state,
+    users: Array.isArray(state.users) && state.users.length ? state.users : defaults.users,
+    sessions: Array.isArray(state.sessions) ? state.sessions : [],
+    clicks: Array.isArray(state.clicks) ? state.clicks : [],
+    checkouts: Array.isArray(state.checkouts) ? state.checkouts : [],
+    sales: Array.isArray(state.sales) ? state.sales : [],
+    webhookEvents: Array.isArray(state.webhookEvents) ? state.webhookEvents : [],
+    advertisingSpend: Array.isArray(state.advertisingSpend) ? state.advertisingSpend : [],
+    auditLogs: Array.isArray(state.auditLogs) ? state.auditLogs : [],
+    products: Array.isArray(state.products) ? state.products : [],
+    settings: {
+      ...defaults.settings,
+      ...(state.settings || {}),
+      general: { ...defaults.settings.general, ...((state.settings || {}).general || {}) },
+      appearance: { ...defaults.settings.appearance, ...((state.settings || {}).appearance || {}) },
+      dashboard: { ...defaults.settings.dashboard, ...((state.settings || {}).dashboard || {}) },
+    },
+    integrations: {
+      ...defaults.integrations,
+      ...(state.integrations || {}),
+      meta: { ...defaults.integrations.meta, ...((state.integrations || {}).meta || {}) },
+      perfectPay: { ...defaults.integrations.perfectPay, ...((state.integrations || {}).perfectPay || {}) },
+    },
+  };
+}
+
+async function ensureStateFile() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try {
+    await fs.access(STATE_FILE);
+  } catch {
+    await fs.writeFile(STATE_FILE, JSON.stringify(createEmptyState(), null, 2), "utf8");
+  }
+}
+
+async function readState() {
+  await ensureStateFile();
+  const raw = await fs.readFile(STATE_FILE, "utf8");
+  return normalizeState(JSON.parse(raw));
+}
+
+async function writeState(state) {
+  const payload = JSON.stringify(normalizeState(state), null, 2);
+  writeQueue = writeQueue.catch(() => {}).then(async () => {
+    await ensureStateFile();
+    const tempFile = `${STATE_FILE}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tempFile, payload, "utf8");
+    try {
+      await fs.rename(tempFile, STATE_FILE);
+    } catch (error) {
+      if (error && (error.code === "EPERM" || error.code === "EBUSY" || error.code === "EEXIST")) {
+        await fs.writeFile(STATE_FILE, payload, "utf8");
+        await fs.unlink(tempFile).catch(() => {});
+        return;
+      }
+      await fs.unlink(tempFile).catch(() => {});
+      throw error;
+    }
+  });
+  return writeQueue;
+}
+
+function createSession(userId) {
+  const token = crypto.randomBytes(24).toString("hex");
+  return {
+    id: `session_${crypto.randomUUID()}`,
+    token,
+    userId,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString(),
+  };
+}
+
+function pruneExpiredSessions(state) {
+  const now = Date.now();
+  const before = state.sessions.length;
+  state.sessions = state.sessions.filter((session) => new Date(session.expiresAt).getTime() > now);
+  return before - state.sessions.length;
+}
+
+function getUserByToken(state, token) {
+  const session = state.sessions.find((item) => item.token === token);
+  if (!session) return null;
+  if (new Date(session.expiresAt).getTime() < Date.now()) return null;
+  return state.users.find((user) => user.id === session.userId) || null;
+}
+
+function appendAuditLog(state, entry) {
+  state.auditLogs.push({
+    id: `audit_${crypto.randomUUID()}`,
+    timestamp: new Date().toISOString(),
+    ...entry,
+  });
+}
+
+module.exports = {
+  createEmptyState,
+  ensureStateFile,
+  readState,
+  writeState,
+  createSession,
+  pruneExpiredSessions,
+  getUserByToken,
+  createPasswordRecord,
+  createUserRecord,
+  verifyPassword,
+  appendAuditLog,
+  normalizeState,
+  encryptSecret,
+  decryptSecret,
+};
+
+
+
+# ============================================================
+# ARQUIVO: backend/src/metrics.js (cálculos)
+# CAMINHO: backend/src/metrics.js
+# ============================================================
+function normalizeMoney(cents, currency = "BRL") {
+  const value = Number(cents || 0) / 100;
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatNumber(value, digits = 0) {
+  if (value == null || Number.isNaN(value)) return "â€”";
+  return new Intl.NumberFormat("pt-BR", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+}
+
+function ratio(numerator, denominator) {
+  if (!denominator) return null;
+  return numerator / denominator;
+}
+
+function matchSource(item, source) {
+  if (!source || source === "all") return true;
+  return String(item.source || "").toLowerCase() === source.toLowerCase();
+}
+
+function buildDashboard(state, query = {}) {
+  const source = query.source || "all";
+  const clicks = state.clicks.filter((item) => matchSource(item, source));
+  const checkouts = state.checkouts.filter((item) => matchSource(item, source));
+  const sales = state.sales.filter((item) => {
+    if (source === "all") return true;
+    if (source === "direct") return !item.source || item.source === "direct";
+    return String(item.source || "").toLowerCase() === source.toLowerCase();
+  });
+  const spendCents = state.advertisingSpend
+    .filter((row) => matchSource(row, source))
+    .reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
+  const revenueCents = sales.filter((sale) => sale.status === "approved").reduce((sum, sale) => sum + Number(sale.amountCents || 0), 0);
+  const refundCents = sales.filter((sale) => sale.status === "refunded" || sale.status === "chargeback").reduce((sum, sale) => sum + Number(sale.amountCents || 0), 0);
+  const netRevenueCents = revenueCents - refundCents;
+  const profitCents = netRevenueCents - spendCents;
+  const approvedSales = sales.filter((sale) => sale.status === "approved").length;
+  const pendingSales = sales.filter((sale) => sale.status === "pending").length;
+  const totalSales = sales.length;
+  const clickCount = clicks.length;
+  const checkoutCount = checkouts.length;
+  const roas = ratio(netRevenueCents, spendCents);
+  const roi = ratio(profitCents, spendCents);
+  const cpa = ratio(spendCents / 100, approvedSales);
+  const cvr = ratio(approvedSales, clickCount);
+  const aov = ratio(revenueCents / 100, approvedSales);
+  const funnel = [
+    { key: "clicks", label: "Cliques", count: clickCount },
+    { key: "pageview", label: "Visita Ã  PÃ¡gina", count: clickCount },
+    { key: "checkout", label: "Iniciar Checkout", count: checkoutCount },
+    { key: "approved", label: "Venda Aprovada", count: approvedSales },
+  ];
+
+  const hasData = clickCount > 0 || checkoutCount > 0 || approvedSales > 0 || spendCents > 0;
+
+  return {
+    ok: true,
+    empty: !hasData,
+    filters: { source },
+    summary: {
+      spendCents,
+      revenueCents,
+      netRevenueCents,
+      profitCents,
+      refundCents,
+      roas,
+      roi,
+      cpa,
+      cvr,
+      aov,
+      approvedSales,
+      pendingSales,
+      totalSales,
+      clickCount,
+      checkoutCount,
+    },
+    cards: [
+      { key: "spend", label: "Investimento", value: normalizeMoney(spendCents), tone: "neutral" },
+      { key: "revenue", label: "Receita", value: normalizeMoney(revenueCents), tone: "neutral" },
+      { key: "profit", label: "Lucro", value: normalizeMoney(profitCents), tone: profitCents >= 0 ? "positive" : "negative" },
+      { key: "roas", label: "ROAS", value: roas == null ? "â€”" : formatNumber(roas, 2), tone: roas != null && roas >= 1 ? "positive" : roas != null ? "negative" : "neutral" },
+      { key: "roi", label: "ROI", value: roi == null ? "â€”" : `${formatNumber(roi * 100, 1)}%`, tone: roi != null && roi >= 0 ? "positive" : roi != null ? "negative" : "neutral" },
+      { key: "cpa", label: "CPA", value: cpa == null ? "â€”" : normalizeMoney(cpa * 100), tone: "neutral" },
+    ],
+    funnel: {
+      empty: !hasData,
+      stages: funnel.map((stage, index) => {
+        const previous = index === 0 ? stage.count : funnel[index - 1].count;
+        const first = funnel[0].count;
+        return {
+          ...stage,
+          previousCount: previous,
+          conversion: index === 0 ? 100 : ratio(stage.count, previous) == null ? null : ratio(stage.count, previous) * 100,
+          firstStageConversion: index === 0 ? 100 : ratio(stage.count, first) == null ? null : ratio(stage.count, first) * 100,
+        };
+      }),
+    },
+    sales: sales.slice().reverse(),
+    clicks: clicks.slice().reverse(),
+    checkouts: checkouts.slice().reverse(),
+    integrations: state.integrations,
+    settings: state.settings,
+    auditLogs: state.auditLogs.slice().reverse(),
+    products: state.products,
+  };
+}
+
+module.exports = {
+  buildDashboard,
+  normalizeMoney,
+  formatNumber,
+  ratio,
+};
+
+
+
+# ============================================================
+# ARQUIVO: backend/.env.example
+# CAMINHO: backend/.env.example
+# ============================================================
+# TrackROI Backend - VariÃ¡veis de ambiente
+# Copie este arquivo para .env e preencha os valores.
+
+# Porta HTTP do backend
+PORT=4100
+
+# Credenciais do usuÃ¡rio administrador (criado automaticamente no primeiro uso)
+ADMIN_EMAIL=admin@trackroi.local
+ADMIN_PASSWORD=TrackROI!2026
+
+# Permite o cadastro de novos usuÃ¡rios pela tela de login (false = apenas login)
+# ALLOW_REGISTRATION=true
+
+# Origem do backend (usada no redirect OAuth da Meta)
+# Em produÃ§Ã£o, use a URL pÃºblica: https://seu-dominio.com
+BACKEND_ORIGIN=http://localhost:4100
+
+# Origens permitidas para CORS (separadas por vÃ­rgula)
+# Ex.: http://localhost:5180,https://app.seudominio.com
+ALLOWED_ORIGINS=http://localhost:5180
+
+# Origem do frontend (usada para redirecionar apÃ³s OAuth)
+FRONTEND_ORIGIN=http://localhost:5180
+
+# --- IntegraÃ§Ã£o Meta Ads (OAuth2) ---
+# Crie um app em https://developers.facebook.com
+META_API_VERSION=v22.0
+META_APP_ID=
+META_APP_SECRET=
+# Deixe vazio para usar: {BACKEND_ORIGIN}/api/integrations/connect/meta/callback
+# META_REDIRECT_URI=
+META_SCOPES=ads_read,ads_management,pages_read_engagement,pages_show_list
+
+# --- IntegraÃ§Ã£o Perfect Pay ---
+# Definir no painel da Perfect Pay o webhook com header:
+#   x-perfectpay-signature: <HMAC-SHA256 do body>
+# O segredo Ã© armazenado no state.json via configuraÃ§Ã£o manual.
+# PERFECTPAY_API_BASE=https://app.perfectpay.com.br
+
+# --- Criptografia dos tokens armazenados (opcional, recomendado) ---
+# Gere com: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# Se vazio, tokens sÃ£o salvos em texto plano (nÃ£o recomendado para produÃ§Ã£o).
+ENCRYPTION_KEY=
+
+# --- HTTPS (opcional) ---
+# Ative apenas se fornecer certificados em backend/certs/cert.pem e key.pem
+# ENABLE_TLS=true
+# TLS_CERT=
+# TLS_KEY=
+
+
+# ============================================================
+# ARQUIVO: frontend/package.json
+# CAMINHO: frontend/package.json
+# ============================================================
+{
+  "name": "trackroi-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}
+
+
+
+# ============================================================
+# ARQUIVO: frontend/server.js (servidor estático)
+# CAMINHO: frontend/server.js
+# ============================================================
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+
+const PORT = Number(process.env.PORT || 5173);
+const ROOT = __dirname;
+const API_BASE = process.env.API_BASE || "";
+
+function contentType(filePath) {
+  if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
+  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
+  return "application/octet-stream";
+}
+
+const server = http.createServer((req, res) => {
+  const requestPath = req.url === "/" ? "/index.html" : req.url.split("?")[0];
+  const safePath = path.normalize(requestPath).replace(/^(\.\.(\/|\\|$))+/, "");
+  const filePath = path.join(ROOT, safePath);
+
+  fs.readFile(filePath, (error, data) => {
+    if (error) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Not found");
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": contentType(filePath),
+      "Cache-Control": "no-store",
+    });
+
+    if (filePath.endsWith(".html")) {
+      const html = data.toString("utf8").replace("</head>", `<script>window.__API_BASE__=${JSON.stringify(API_BASE)};</script></head>`);
+      res.end(html);
+      return;
+    }
+    res.end(data);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Frontend listening on http://localhost:${PORT}`);
+});
+
+function shutdown() {
+  console.log("Frontend server encerrado");
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+
+
+# ============================================================
+# ARQUIVO: frontend/index.html
+# CAMINHO: frontend/index.html
+# ============================================================
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrackROI â€” Rastreamento de vendas</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app-view" class="app-shell" hidden>
+      <aside class="sidebar">
+        <button id="sidebar-toggle" class="brand sidebar-toggle" type="button" aria-label="Alternar menu lateral">
+          <div class="brand-mark">T</div>
+          <div class="sidebar-brand-text">
+            <div class="brand-name">TrackROI</div>
+            <div class="brand-subtitle">Rastreamento de vendas</div>
+          </div>
+        </button>
+
+        <nav class="nav" id="nav-links">
+          <a class="nav-item active" href="#dashboard" data-route="dashboard"><span class="nav-icon" data-icon="dashboard"></span><span class="nav-label">Dashboard</span></a>
+          <a class="nav-item" href="#sales" data-route="sales"><span class="nav-icon" data-icon="sales"></span><span class="nav-label">Vendas</span></a>
+          <a class="nav-item" href="#funnel" data-route="funnel"><span class="nav-icon" data-icon="funnel"></span><span class="nav-label">Funil</span></a>
+          <a class="nav-item" href="#metrics" data-route="metrics"><span class="nav-icon" data-icon="metrics"></span><span class="nav-label">MÃ©tricas</span></a>
+          <a class="nav-item" href="#products" data-route="products"><span class="nav-icon" data-icon="products"></span><span class="nav-label">Produtos</span></a>
+          <a class="nav-item" href="#connections" data-route="connections"><span class="nav-icon" data-icon="connections"></span><span class="nav-label">ConexÃµes</span></a>
+          <a class="nav-item" href="#settings" data-route="settings"><span class="nav-icon" data-icon="settings"></span><span class="nav-label">ConfiguraÃ§Ãµes</span></a>
+          <a class="nav-item" href="#logs" data-route="logs"><span class="nav-icon" data-icon="logs"></span><span class="nav-label">Logs</span></a>
+        </nav>
+
+        <div class="sidebar-panel">
+          <div class="panel-title">Comece por aqui</div>
+          <div class="panel-line">Conecte suas ferramentas de anÃºncios e pagamento para automatizar o rastreamento.</div>
+        </div>
+
+        <div class="sidebar-user" id="sidebar-user">
+          <div class="avatar" id="sidebar-avatar">A</div>
+          <div class="sidebar-user-meta">
+            <div class="sidebar-user-name" id="sidebar-user-name">â€”</div>
+            <div class="sidebar-user-role" id="sidebar-user-role">â€”</div>
+          </div>
+        </div>
+
+        <button id="logout-button" type="button" class="logout-button"><span class="nav-icon" data-icon="logout"></span><span class="logout-label">Sair</span></button>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow" id="page-eyebrow">Dashboard</div>
+            <h1 id="page-title">Resumo geral</h1>
+          </div>
+          <div class="topbar-controls" id="page-controls"></div>
+        </header>
+
+        <section class="status-strip" id="status-strip" hidden></section>
+
+        <section id="page-root"></section>
+      </main>
+    </div>
+
+    <div id="login-view" class="login-shell">
+      <section class="login-panel">
+        <div class="login-side">
+          <div class="brand login-brand">
+            <div class="brand-mark">T</div>
+            <div>
+              <div class="brand-name">TrackROI</div>
+              <div class="brand-subtitle">Rastreamento de vendas</div>
+            </div>
+          </div>
+          <h2>Seus resultados,<br />em um sÃ³ lugar.</h2>
+          <p class="login-side-copy">Conecte seus anÃºncios e sua plataforma de pagamento. O TrackROI reÃºne cliques, vendas e investimento em um painel claro e direto.</p>
+          <ul class="login-benefits">
+            <li><span class="benefit-dot"></span>Sem planilhas nem processos manuais</li>
+            <li><span class="benefit-dot"></span>ConexÃµes simples, sem configuraÃ§Ã£o tÃ©cnica</li>
+            <li><span class="benefit-dot"></span>ROAS, ROI e funil calculados automaticamente</li>
+          </ul>
+        </div>
+        <div class="login-form-wrap">
+          <form id="login-form" class="login-form">
+            <h1>Entrar</h1>
+            <p class="panel-line">Acesse o painel com sua conta.</p>
+            <label>
+              <span>Email</span>
+              <input id="email-input" type="email" autocomplete="username" placeholder="voce@empresa.com" />
+            </label>
+            <label>
+              <span>Senha</span>
+              <input id="password-input" type="password" autocomplete="current-password" placeholder="Sua senha" />
+            </label>
+            <button type="submit">Entrar</button>
+            <div id="login-error" class="login-error" hidden></div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
+
+
+# ============================================================
+# ARQUIVO: frontend/app.js (UI)
+# CAMINHO: frontend/app.js
+# ============================================================
+const API_BASE = window.__API_BASE__ || "";
+const TOKEN_KEY = "trackroi_token";
+
+const state = {
+  token: localStorage.getItem(TOKEN_KEY) || "",
+  csrfToken: localStorage.getItem("trackroi_csrf") || "",
+  user: null,
+  route: normalizeRoute(location.hash.slice(1) || "dashboard"),
+  source: "all",
+  data: null,
+  loading: false,
+  sidebarExpanded: localStorage.getItem("trackroi_sidebar_expanded") !== "0",
+};
+
+const sidebarIcons = {
+  dashboard: iconDashboard(),
+  sales: iconSales(),
+  funnel: iconFunnel(),
+  metrics: iconMetrics(),
+  products: iconProducts(),
+  connections: iconConnections(),
+  settings: iconSettings(),
+  logs: iconLogs(),
+  logout: iconLogout(),
+};
+
+function normalizeRoute(route) {
+  const allowed = new Set(["dashboard", "sales", "funnel", "metrics", "products", "connections", "settings", "logs"]);
+  return allowed.has(route) ? route : "dashboard";
+}
+
+function el(id) {
+  return document.getElementById(id);
+}
+
+function money(cents) {
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format((Number(cents) || 0) / 100);
+}
+
+function percent(value) {
+  if (value == null || Number.isNaN(value)) return "â€”";
+  return `${Number(value).toFixed(1)}%`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function formatDateTime(value) {
+  if (!value) return "â€”";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+async function apiFetch(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (state.csrfToken && options.method && options.method !== "GET") {
+    headers["X-CSRF-Token"] = state.csrfToken;
+  }
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch (networkError) {
+    throw new Error("NÃ£o foi possÃ­vel conectar. Verifique sua internet e tente novamente.");
+  }
+  if (response.status === 401) {
+    state.token = "";
+    state.csrfToken = "";
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("trackroi_csrf");
+    throw new Error("AUTH_REQUIRED");
+  }
+  const text = await response.text();
+  let body = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = {};
+    }
+  }
+  if (!response.ok) {
+    throw new Error(body.error || `Erro ao processar a solicitaÃ§Ã£o`);
+  }
+  return body;
+}
+
+function setStatus(message) {
+  const node = el("status-strip");
+  if (node) {
+    node.hidden = !message;
+    node.textContent = message || "";
+  }
+}
+
+function setLoginError(message) {
+  const node = el("login-error");
+  node.hidden = !message;
+  node.textContent = message || "";
+}
+
+function showLogin() {
+  const app = el("app-view");
+  if (app) app.hidden = true;
+  const login = el("login-view");
+  if (login) login.classList.add("visible");
+  el("email-input").value = "";
+  el("password-input").value = "";
+}
+
+function showApp() {
+  const app = el("app-view");
+  if (app) app.hidden = false;
+  const login = el("login-view");
+  if (login) login.classList.remove("visible");
+  applySidebarState();
+  updateSidebarUser();
+}
+
+function setRoute(route) {
+  state.route = normalizeRoute(route);
+  location.hash = `#${state.route}`;
+  updateNav();
+  renderPage();
+}
+
+function updateNav() {
+  document.querySelectorAll("[data-route]").forEach((item) => {
+    item.classList.toggle("active", item.dataset.route === state.route);
+  });
+}
+
+function applySidebarState() {
+  const app = el("app-view");
+  if (!app) return;
+  app.classList.toggle("sidebar-collapsed", !state.sidebarExpanded);
+  localStorage.setItem("trackroi_sidebar_expanded", state.sidebarExpanded ? "1" : "0");
+}
+
+function updateSidebarUser() {
+  const name = el("sidebar-user-name");
+  const role = el("sidebar-user-role");
+  const avatar = el("sidebar-avatar");
+  if (state.user) {
+    if (name) name.textContent = state.user.name || "UsuÃ¡rio";
+    if (role) role.textContent = state.user.role === "admin" ? "Administrador" : "Membro";
+    if (avatar) avatar.textContent = (state.user.name || "U").charAt(0).toUpperCase();
+  }
+}
+
+function mountSidebarIcons() {
+  document.querySelectorAll(".nav-icon").forEach((node) => {
+    const key = node.dataset.icon;
+    node.innerHTML = sidebarIcons[key] || "";
+  });
+}
+
+function renderMetricCards(cards) {
+  return `
+    <section class="cards-grid">
+      ${cards
+        .map((card) => {
+          const toneClass = card.tone === "positive" ? "positive" : card.tone === "negative" ? "negative" : "";
+          const hint = card.hint ? `<div class="metric-hint">${escapeHtml(card.hint)}</div>` : "";
+          return `
+            <article class="metric-card">
+              <div class="metric-label">${escapeHtml(card.label)}</div>
+              <div class="metric-value ${toneClass}">${escapeHtml(card.value)}</div>
+              ${hint}
+            </article>
+          `;
+        })
+        .join("")}
+    </section>
+  `;
+}
+
+function funnelHtml(funnel) {
+  if (!funnel || funnel.empty) {
+    return `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para comeÃ§ar.</div>`;
+  }
+  const max = Math.max(...funnel.stages.map((stage) => stage.count), 1);
+  const colors = ["#7c5cff", "#d24dd8", "#ff6b9d", "#ff5c7a"];
+  return `
+    <div class="funnel-chart">
+      ${funnel.stages
+        .map((stage, index) => {
+          const color = colors[Math.min(index, colors.length - 1)];
+          const width = Math.max(30, Math.round((stage.count / max) * 100));
+          return `
+            <div class="funnel-stage">
+              <div class="funnel-bar" style="width:${width}%; background: linear-gradient(90deg, ${color} 0%, ${color}cc 100%); box-shadow: 0 0 18px ${color}40;">
+                <span>${escapeHtml(stage.label)}</span>
+                <span class="funnel-count">${stage.count}</span>
+              </div>
+              <div class="funnel-meta">
+                <span>${stage.conversion == null ? "â€”" : `${percent(stage.conversion)} entre etapas`}</span>
+                <span>${stage.firstStageConversion == null ? "â€”" : `${percent(stage.firstStageConversion)} do total`}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function statusPill(status) {
+  const map = {
+    connected: ["Conectado", "ok"],
+    not_connected: ["Desconectado", "off"],
+    needs_reconnect: ["Precisa atenÃ§Ã£o", "warn"],
+    configured: ["Configurado", "ok"],
+    not_configured: ["NÃ£o configurado", "off"],
+  };
+  const [label, tone] = map[status] || [status || "â€”", "off"];
+  return `<span class="status-pill ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function sectionPanel(title, subtitle, body) {
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">${escapeHtml(title)}</div>
+          ${subtitle ? `<div class="panel-subtitle">${escapeHtml(subtitle)}</div>` : ""}
+        </div>
+      </div>
+      ${body}
+    </section>
+  `;
+}
+
+function tableHtml(headers, rows) {
+  if (!rows.length) return `<div class="empty-state">Nenhum dado ainda.</div>`;
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${rows.join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function pageControls(route) {
+  const controls = el("page-controls");
+  if (!controls) return;
+  const refresh = `<button id="refresh-button" type="button" class="ghost">Atualizar</button>`;
+  const sourceSelect = `
+    <label class="select-wrap">
+      <span>TrÃ¡fego</span>
+      <select id="source-filter">
+        <option value="all" ${state.source === "all" ? "selected" : ""}>Tudo</option>
+        <option value="direct" ${state.source === "direct" ? "selected" : ""}>Direto</option>
+        <option value="meta" ${state.source === "meta" ? "selected" : ""}>Meta</option>
+      </select>
+    </label>
+  `;
+  const routeControls = {
+    dashboard: `${sourceSelect}${refresh}`,
+    funnel: `${sourceSelect}${refresh}`,
+    sales: refresh,
+    metrics: refresh,
+    products: `<button id="product-create-button" type="button">Novo produto</button>${refresh}`,
+    connections: refresh,
+    settings: `<button id="save-settings-button" type="button">Salvar</button>${refresh}`,
+    logs: refresh,
+  };
+  controls.innerHTML = routeControls[route] || refresh;
+}
+
+function integrationConnectUrl(provider) {
+  return `${API_BASE}/api/integrations/connect/${provider}?token=${encodeURIComponent(state.token || "")}`;
+}
+
+function pageTitle(route) {
+  const titles = {
+    dashboard: ["Dashboard", "Resumo geral"],
+    sales: ["Vendas", "Pedidos e eventos de pagamento"],
+    funnel: ["Funil", "ConversÃ£o por etapa"],
+    metrics: ["MÃ©tricas", "Resumo financeiro e operacional"],
+    products: ["Produtos", "CatÃ¡logo e preÃ§os"],
+    connections: ["ConexÃµes", "Conecte suas ferramentas"],
+    settings: ["ConfiguraÃ§Ãµes", "PreferÃªncias da conta"],
+    logs: ["Logs", "HistÃ³rico de eventos"],
+  };
+  const [eyebrow, title] = titles[route];
+  el("page-eyebrow").textContent = eyebrow;
+  el("page-title").textContent = title;
+}
+
+function emptyDashboard() {
+  return `
+    <section class="onboarding">
+      <div class="onboarding-orb"></div>
+      <h3>Bem-vindo ao TrackROI</h3>
+      <p>Conecte suas ferramentas de anÃºncios e pagamento e o seu painel comeÃ§a a se preencher automaticamente.</p>
+      <div class="onboarding-actions">
+        <a class="btn-primary" href="#connections">Configurar conexÃµes</a>
+        <a class="btn-ghost" href="#metrics">Ver mÃ©tricas</a>
+      </div>
+    </section>
+  `;
+}
+
+function dashboardPage(data) {
+  const hasData = data && data.empty === false;
+  const body = hasData
+    ? `
+      ${renderMetricCards(data.cards || [])}
+      ${sectionPanel("Funil de conversÃ£o", "Cliques, visitas, checkouts e vendas.", funnelHtml(data.funnel))}
+    `
+    : emptyDashboard();
+  return body;
+}
+
+function salesTable(items) {
+  const rows = items.map((sale) => `
+    <tr>
+      <td>${escapeHtml(sale.gateway === "perfectpay" ? "Perfect Pay" : sale.gateway)}</td>
+      <td><span class="status-pill ${sale.status === "approved" ? "ok" : sale.status === "refunded" || sale.status === "chargeback" ? "warn" : "off"}">${escapeHtml(sale.status)}</span></td>
+      <td>${escapeHtml(money(sale.amountCents || 0))}</td>
+      <td>${escapeHtml(sale.gatewayTransactionId || "â€”")}</td>
+      <td>${escapeHtml(formatDateTime(sale.createdAt))}</td>
+    </tr>
+  `);
+  return tableHtml(["Pagamento", "Status", "Valor", "TransaÃ§Ã£o", "Data"], rows);
+}
+
+function salesPage(data) {
+  return sectionPanel("Vendas", "Todas as vendas registradas automaticamente.", salesTable(data.sales || []));
+}
+
+function funnelPage(data) {
+  const hasData = data && data.empty === false;
+  const body = hasData
+    ? funnelHtml(data.funnel)
+    : `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para comeÃ§ar.</div>`;
+  return sectionPanel("Funil", "Acompanhe a conversÃ£o em cada etapa.", body);
+}
+
+function metricsSummary(summary) {
+  const items = [
+    ["Cliques", summary.clickCount],
+    ["Checkouts iniciados", summary.checkoutCount],
+    ["Vendas aprovadas", summary.approvedSales],
+    ["Pendentes", summary.pendingSales],
+    ["AOV (ticket mÃ©dio)", summary.aov == null ? "â€”" : money(summary.aov * 100)],
+    ["Taxa de conversÃ£o", percent(summary.cvr != null ? summary.cvr * 100 : null)],
+  ];
+  return `
+    <div class="info-grid">
+      ${items.map(([label, value]) => `<div class="info-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
+    </div>
+  `;
+}
+
+function metricsPage(data) {
+  const summary = data.summary || {};
+  return `
+    ${renderMetricCards(data.cards || [])}
+    ${sectionPanel("Resumo detalhado", "Indicadores calculados automaticamente.", metricsSummary(summary))}
+  `;
+}
+
+function productsPage(data) {
+  const rows = (data.products || []).map((product) => `
+    <tr>
+      <td>${escapeHtml(product.name)}</td>
+      <td>${escapeHtml(money(product.priceCents || 0))}</td>
+      <td>${formatDateTime(product.createdAt)}</td>
+    </tr>
+  `);
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Produtos</div>
+          <div class="panel-subtitle">Cadastre os produtos do seu catÃ¡logo.</div>
+        </div>
+      </div>
+      <form id="product-form" class="inline-form">
+        <label><span>Nome</span><input id="product-name" type="text" /></label>
+        <label><span>PreÃ§o (R$)</span><input id="product-price" type="number" min="0" step="0.01" placeholder="19,90" /></label>
+        <button type="submit">Adicionar</button>
+      </form>
+      ${tableHtml(["Produto", "PreÃ§o", "Criado em"], rows)}
+    </section>
+  `;
+}
+
+function connectionCard({ provider, name, description, status, detail, connectUrl }) {
+  const connected = status === "connected" || status === "configured";
+  return `
+    <article class="connection-card ${connected ? "is-connected" : ""}">
+      <div class="connection-card-head">
+        <div class="connection-logo">${name.charAt(0)}</div>
+        <div class="connection-card-title">
+          <div class="connection-name">${escapeHtml(name)}</div>
+          <div class="connection-desc">${escapeHtml(description)}</div>
+        </div>
+        ${statusPill(status)}
+      </div>
+      <div class="connection-card-body">
+        <div class="connection-line">${escapeHtml(detail || (connected ? "Tudo pronto." : "Sua ferramenta ainda nÃ£o estÃ¡ conectada."))}</div>
+        <div class="connection-actions">
+          <a class="btn-primary" href="${connectUrl}" target="_blank" rel="noreferrer">
+            ${connected ? "Gerenciar" : "Conectar"}
+          </a>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function connectionsPage(data) {
+  const integrations = data.integrations || {};
+  const meta = integrations.meta || {};
+  const perfectPay = integrations.perfectPay || {};
+
+  const metaConnected = meta.status === "connected";
+  const ppConnected = perfectPay.status === "connected" || perfectPay.apiStatus === "connected";
+
+  const hero = `
+    <section class="connections-hero">
+      <div class="connections-hero-copy">
+        <h3>Conecte suas ferramentas</h3>
+        <p>Vincule seus anÃºncios e sua plataforma de pagamento. Depois de conectar, os dados entram sozinhos â€” sem trabalho manual.</p>
+      </div>
+      <div class="connections-progress">
+        <div class="progress-steps">
+          <span class="progress-step ${metaConnected ? "done" : ""}">${metaConnected ? "âœ“" : "1"}</span>
+          <span class="progress-line ${metaConnected ? "done" : ""}"></span>
+          <span class="progress-step ${ppConnected ? "done" : ""}">${ppConnected ? "âœ“" : "2"}</span>
+        </div>
+        <div class="progress-label">${metaConnected && ppConnected ? "Tudo pronto!" : "Faltam " + ((metaConnected ? 0 : 1) + (ppConnected ? 0 : 1)) + " conexÃµes"}</div>
+      </div>
+    </section>
+  `;
+
+  const cards = `
+    <section class="connections-layout">
+      ${connectionCard({
+        provider: "meta",
+        name: "Meta Ads",
+        description: "Importe gastos, campanhas e resultados dos seus anÃºncios.",
+        status: meta.status,
+        detail: metaConnected ? `Conectado${meta.connectedAccount ? ` â€” ${meta.connectedAccount}` : ""}` : "Ainda nÃ£o conectado.",
+        connectUrl: integrationConnectUrl("meta"),
+      })}
+      ${connectionCard({
+        provider: "perfectpay",
+        name: "Perfect Pay",
+        description: "Receba suas vendas aprovadas automaticamente.",
+        status: perfectPay.apiStatus,
+        detail: ppConnected ? "Conectado e recebendo eventos." : "Ainda nÃ£o conectado.",
+        connectUrl: integrationConnectUrl("perfectpay"),
+      })}
+    </section>
+  `;
+
+  const advanced = `
+    <details class="advanced-section">
+      <summary><span class="advanced-title">ConfiguraÃ§Ãµes avanÃ§adas</span><span class="advanced-caret"></span></summary>
+      <div class="advanced-body">
+        <form id="meta-connection-form" class="stack-form compact-form">
+          <div class="form-title">Meta Ads</div>
+          <label><span>Status</span>
+            <select id="meta-status">
+              <option value="not_connected" ${meta.status === "not_connected" ? "selected" : ""}>NÃ£o conectado</option>
+              <option value="connected" ${meta.status === "connected" ? "selected" : ""}>Conectado</option>
+              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa atenÃ§Ã£o</option>
+            </select>
+          </label>
+          <label><span>ID da conta de anÃºncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
+          <button type="submit">Salvar Meta</button>
+        </form>
+
+        <form id="perfectpay-connection-form" class="stack-form compact-form">
+          <div class="form-title">Perfect Pay</div>
+          <label><span>Status</span>
+            <select id="perfectpay-status">
+              <option value="not_connected" ${perfectPay.status === "not_connected" ? "selected" : ""}>NÃ£o conectado</option>
+              <option value="connected" ${perfectPay.status === "connected" ? "selected" : ""}>Conectado</option>
+              <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa atenÃ§Ã£o</option>
+            </select>
+          </label>
+          <label><span>URL de eventos</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
+          <label><span>Segredo compartilhado</span><input id="perfectpay-webhook-secret" type="password" value="${escapeHtml(perfectPay.webhookSecret || "")}" placeholder="Segredo" /></label>
+          <button type="submit">Salvar Perfect Pay</button>
+        </form>
+      </div>
+    </details>
+  `;
+
+  const guide = sectionPanel(
+    "Como funciona",
+    "TrÃªs passos simples para comeÃ§ar.",
+    `
+    <div class="tutorial-grid">
+      <div class="tutorial-card">
+        <div class="tutorial-step">1</div>
+        <strong>Conecte o Meta Ads</strong>
+        <p>Clique em "Conectar" e autorize o acesso na janela que abrir.</p>
+      </div>
+      <div class="tutorial-card">
+        <div class="tutorial-step">2</div>
+        <strong>Conecte o Perfect Pay</strong>
+        <p>Repita o mesmo processo para receber suas vendas.</p>
+      </div>
+      <div class="tutorial-card">
+        <div class="tutorial-step">3</div>
+        <strong>Acompanhe os resultados</strong>
+        <p>O dashboard passa a mostrar vendas, investimento e ROAS em tempo real.</p>
+      </div>
+    </div>
+    `
+  );
+
+  return `${hero}${cards}${advanced}${guide}`;
+}
+
+function settingsPage(data) {
+  const settings = data.settings;
+  return sectionPanel(
+    "ConfiguraÃ§Ãµes",
+    "PreferÃªncias da sua conta.",
+    `
+    <form id="settings-form" class="settings-grid">
+      <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(settings.general.companyName)}" /></label>
+      <label><span>Fuso horÃ¡rio</span><input id="timezone" type="text" value="${escapeHtml(settings.general.timezone)}" /></label>
+      <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(settings.general.currency)}" /></label>
+    </form>
+    `
+  );
+}
+
+function logsPage(data) {
+  const webhooks = (data.webhookEvents || []).map((item) => `
+    <tr>
+      <td>${escapeHtml(formatDateTime(item.receivedAt))}</td>
+      <td>${escapeHtml(item.gateway === "perfectpay" ? "Perfect Pay" : item.gateway)}</td>
+      <td>${escapeHtml(item.eventType)}</td>
+      <td><span class="status-pill ok">${escapeHtml(item.status)}</span></td>
+    </tr>
+  `);
+  const audits = (data.auditLogs || []).map((item) => `
+    <tr>
+      <td>${escapeHtml(formatDateTime(item.timestamp))}</td>
+      <td>${escapeHtml(item.action)}</td>
+    </tr>
+  `);
+  return `
+    <div class="chart-grid">
+      ${sectionPanel("Eventos recebidos", "SincronizaÃ§Ãµes das suas ferramentas conectadas.", tableHtml(["Data", "Ferramenta", "Evento", "Status"], webhooks))}
+      ${sectionPanel("Atividade da conta", "AÃ§Ãµes realizadas no sistema.", tableHtml(["Data", "AÃ§Ã£o"], audits))}
+    </div>
+  `;
+}
+
+function renderPage() {
+  const root = el("page-root");
+  const data = state.data || {};
+  pageTitle(state.route);
+  pageControls(state.route);
+
+  const renderers = {
+    dashboard: dashboardPage,
+    sales: salesPage,
+    funnel: funnelPage,
+    metrics: metricsPage,
+    products: productsPage,
+    connections: connectionsPage,
+    settings: settingsPage,
+    logs: logsPage,
+  };
+  root.innerHTML = renderers[state.route](data);
+  attachPageHandlers();
+}
+
+function attachPageHandlers() {
+  const refresh = el("refresh-button");
+  if (refresh) refresh.onclick = loadDataAndRender;
+
+  const source = el("source-filter");
+  if (source) {
+    source.onchange = () => {
+      state.source = source.value;
+      loadDataAndRender();
+    };
+  }
+
+  const logout = el("logout-button");
+  if (logout) {
+    logout.onclick = async () => {
+      try {
+        await apiFetch("/api/auth/logout", { method: "POST", body: "{}" });
+      } finally {
+        stopPolling();
+        state.token = "";
+        state.user = null;
+        state.csrfToken = "";
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem("trackroi_csrf");
+        showLogin();
+      }
+    };
+  }
+
+  const productForm = el("product-form");
+  if (productForm) {
+    productForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const name = el("product-name").value.trim();
+      const priceInput = el("product-price").value.replace(",", ".");
+      const price = Number(priceInput || 0);
+      if (!name) return;
+      await apiFetch("/api/products", { method: "POST", body: JSON.stringify({ name, priceCents: Math.round(price * 100) }) });
+      await loadDataAndRender();
+    };
+  }
+
+  const metaConnectionForm = el("meta-connection-form");
+  if (metaConnectionForm) {
+    metaConnectionForm.onsubmit = async (event) => {
+      event.preventDefault();
+      await apiFetch("/api/integrations/meta", {
+        method: "PUT",
+        body: JSON.stringify({
+          status: el("meta-status").value,
+          adAccountId: el("meta-ad-account-id").value.trim(),
+        }),
+      });
+      setStatus("ConfiguraÃ§Ãµes do Meta salvas.");
+      await loadDataAndRender();
+    };
+  }
+
+  const perfectPayConnectionForm = el("perfectpay-connection-form");
+  if (perfectPayConnectionForm) {
+    perfectPayConnectionForm.onsubmit = async (event) => {
+      event.preventDefault();
+      await apiFetch("/api/integrations/perfectpay", {
+        method: "PUT",
+        body: JSON.stringify({
+          status: el("perfectpay-status").value,
+          webhookSecret: el("perfectpay-webhook-secret").value.trim(),
+          webhookUrl: el("perfectpay-webhook-url").value.trim(),
+          webhookStatus: "configured",
+          apiStatus: "configured",
+        }),
+      });
+      setStatus("ConfiguraÃ§Ãµes da Perfect Pay salvas.");
+      await loadDataAndRender();
+    };
+  }
+
+  const productCreateButton = el("product-create-button");
+  if (productCreateButton) {
+    productCreateButton.onclick = () => {
+      const form = el("product-form");
+      if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    };
+  }
+
+  const settingsForm = el("settings-form");
+  if (settingsForm) {
+    settingsForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const payload = {
+        general: {
+          companyName: el("company-name").value.trim(),
+          timezone: el("timezone").value.trim(),
+          currency: el("currency").value.trim(),
+        },
+      };
+      await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+      setStatus("ConfiguraÃ§Ãµes salvas.");
+      await loadDataAndRender();
+    };
+  }
+
+  const saveSettingsButton = el("save-settings-button");
+  if (saveSettingsButton) {
+    saveSettingsButton.onclick = () => {
+      const form = el("settings-form");
+      if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    };
+  }
+}
+
+async function loadDataAndRender() {
+  state.loading = true;
+  setStatus("");
+  try {
+    const [dashboard, sales, products, settings, integrations, auditLogs, webhookEvents] = await Promise.all([
+      apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
+      apiFetch("/api/sales"),
+      apiFetch("/api/products"),
+      apiFetch("/api/settings"),
+      apiFetch("/api/integrations"),
+      apiFetch("/api/audit-logs"),
+      apiFetch("/api/webhook-events"),
+    ]);
+
+    state.data = {
+      ...dashboard,
+      sales: sales.items,
+      products: products.items,
+      settings: settings.settings,
+      integrations: integrations.items,
+      auditLogs: auditLogs.items,
+      webhookEvents: webhookEvents.items,
+    };
+    state.loading = false;
+    renderPage();
+    if (dashboard.empty) {
+      setStatus("");
+    } else {
+      setStatus(`Tudo em dia: ${dashboard.summary.totalSales} vendas e ${dashboard.summary.clickCount} cliques rastreados.`);
+    }
+  } catch (error) {
+    state.loading = false;
+    if (error.message === "AUTH_REQUIRED") {
+      showLogin();
+      return;
+    }
+    setStatus(`NÃ£o foi possÃ­vel atualizar os dados: ${error.message}`);
+  }
+}
+
+async function login(email, password) {
+  const result = await apiFetch("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+    headers: { "Content-Type": "application/json" },
+  });
+  state.token = result.token;
+  state.user = result.user;
+  state.csrfToken = result.csrfToken || "";
+  localStorage.setItem(TOKEN_KEY, result.token);
+  if (state.csrfToken) localStorage.setItem("trackroi_csrf", state.csrfToken);
+  showApp();
+  startPolling();
+  await loadDataAndRender();
+}
+
+let pollingTimer = null;
+
+function startPolling() {
+  stopPolling();
+  pollingTimer = setInterval(() => {
+    if (state.token && state.user && !state.loading) {
+      loadDataAndRender();
+    }
+  }, 30000);
+}
+
+function stopPolling() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+  }
+}
+
+async function bootstrap() {
+  mountSidebarIcons();
+  applySidebarState();
+
+  el("login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setLoginError("");
+    try {
+      await login(el("email-input").value.trim(), el("password-input").value);
+    } catch (error) {
+      setLoginError(error.message === "AUTH_REQUIRED" ? "SessÃ£o expirada. FaÃ§a login novamente." : error.message);
+    }
+  });
+
+  window.addEventListener("hashchange", async () => {
+    state.route = normalizeRoute(location.hash.slice(1) || "dashboard");
+    updateNav();
+    if (state.data) renderPage();
+  });
+
+  if (state.token) {
+    try {
+      const me = await apiFetch("/api/auth/me");
+      state.user = me.user;
+      state.csrfToken = me.csrfToken || "";
+      localStorage.setItem("trackroi_csrf", state.csrfToken);
+      showApp();
+      startPolling();
+      await loadDataAndRender();
+      return;
+    } catch {
+      state.token = "";
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem("trackroi_csrf");
+    }
+  }
+
+  const sidebarToggle = el("sidebar-toggle");
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener("click", () => {
+      state.sidebarExpanded = !state.sidebarExpanded;
+      applySidebarState();
+    });
+  }
+
+  showLogin();
+}
+
+function iconDashboard() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5V20h6v-5.5H4Zm10 0V20h6v-8.5h-6ZM4 4v5.5h6V4H4Zm10 0v5.5h6V4h-6Z"/></svg>';
+}
+
+function iconSales() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v2H4v2h3v12h2v-2h5.5a4.5 4.5 0 0 0 0-9H9V7h10V5H9V3H7Zm2 7h5.5a2.5 2.5 0 0 1 0 5H9v-5Z"/></svg>';
+}
+
+function iconFunnel() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 7v5l-4 2v-7L4 5Zm4.8 2L11 10h2l2.2-3H8.8Z"/></svg>';
+}
+
+function iconMetrics() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16v2H4v-2Zm2-1.5 4-5 3 3 5.5-7 1.6 1.2-7.1 9.3-3-3L7.6 19 6 17.5Z"/></svg>';
+}
+
+function iconProducts() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Zm0 2.2 5.9 2.9L12 11 6.1 8.1 12 5.2Zm-6 4 5 2.5v6.2l-5-2.5V9.2Zm7 8.7v-6.2l5-2.5v6.2l-5 2.5Z"/></svg>';
+}
+
+function iconConnections() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4a4 4 0 0 0-3.7 5.5L12 18.2l8.7-8.7A4 4 0 0 0 17 4a3.9 3.9 0 0 0-3 1.4L12 8.1 10 5.4A3.9 3.9 0 0 0 7 4Zm0 2a2 2 0 0 1 1.6.8L12 11.7l3.4-4.9A2 2 0 0 1 19 7a2 2 0 0 1-.6 1.4L12 14.8 5.6 8.4A2 2 0 0 1 7 6Z"/></svg>';
+}
+
+function iconSettings() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.2 2.7 3 .6 1.7 2.4-1.1 2.9 1.1 2.9-1.7 2.4-3 .6L12 22l-1.2-2.7-3-.6-1.7-2.4 1.1-2.9-1.1-2.9 1.7-2.4 3-.6L12 2Zm0 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/></svg>';
+}
+
+function iconLogs() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l5 5v13H6V3Zm8 1.5V9h4.5L14 4.5ZM8 12h8v2H8v-2Zm0 4h8v2H8v-2Z"/></svg>';
+}
+
+function iconLogout() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4v-2H6V7h4V5Zm4.3 3.3-1.4 1.4 2.3 2.3H8v2h7.2l-2.3 2.3 1.4 1.4L19 12l-4.7-4.7Z"/></svg>';
+}
+
+document.addEventListener("DOMContentLoaded", bootstrap);
+
+
+# ============================================================
+# ARQUIVO: frontend/styles.css
+# CAMINHO: frontend/styles.css
+# ============================================================
+:root {
+  color-scheme: dark;
+  --bg: #07090d;
+  --bg-2: #0d1117;
+  --panel: #11161d;
+  --panel-2: #151b23;
+  --border: #232c37;
+  --border-soft: #1b222c;
+  --text: #f2f5f8;
+  --muted: #96a2b0;
+  --accent: #8b7cf6;
+  --accent-2: #6ea8fe;
+  --green: #3ddc84;
+  --red: #ff6b6b;
+  --yellow: #ffd166;
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font: "Inter", "Segoe UI", Arial, sans-serif;
+  --font-display: "Space Grotesk", "Inter", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 500px at 15% -10%, rgba(139, 124, 246, 0.07), transparent 60%),
+    radial-gradient(1000px 400px at 90% 0%, rgba(110, 168, 254, 0.05), transparent 55%),
+    linear-gradient(180deg, #07090d 0%, #0b0f15 100%);
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+.brand-name {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+button,
+select,
+input {
+  font-family: var(--font);
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  align-items: stretch;
+}
+
+.app-shell.locked {
+  filter: blur(1.8px) saturate(0.85);
+  pointer-events: none;
+  user-select: none;
+}
+
+.sidebar {
+  flex: 0 0 260px;
+  width: 260px;
+  border-right: 1px solid var(--border);
+  background: rgba(9, 12, 17, 0.92);
+  backdrop-filter: blur(12px);
+  padding: 24px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow: hidden;
+  transition: width 280ms cubic-bezier(0.2, 0.8, 0.2, 1), flex-basis 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+  flex-basis: 92px;
+  width: 92px;
+}
+
+.app-shell.sidebar-collapsed .sidebar-brand-text,
+.app-shell.sidebar-collapsed .nav-label,
+.app-shell.sidebar-collapsed .panel-line,
+.app-shell.sidebar-collapsed .logout-label,
+.app-shell.sidebar-collapsed .sidebar-user-meta {
+  opacity: 0;
+  transform: translateX(-10px);
+  width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.app-shell.sidebar-collapsed .sidebar-panel,
+.app-shell.sidebar-collapsed .sidebar-user {
+  display: none;
+}
+
+.app-shell.sidebar-collapsed .sidebar-toggle {
+  justify-content: center;
+}
+
+.app-shell.sidebar-collapsed .sidebar-toggle .brand-mark {
+  margin: 0 auto;
+}
+
+.app-shell.sidebar-collapsed .nav {
+  gap: 10px;
+}
+
+.app-shell.sidebar-collapsed .nav-item {
+  justify-content: center;
+  padding: 10px;
+  gap: 0;
+}
+
+.app-shell.sidebar-collapsed .logout-button {
+  justify-content: center;
+  padding: 0 10px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #2a2438, #15121b);
+  border: 1px solid rgba(139, 124, 246, 0.35);
+  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: #c9c2ff;
+  box-shadow: 0 0 24px rgba(139, 124, 246, 0.18);
+}
+
+.brand-name {
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.sidebar-brand-text {
+  display: grid;
+  gap: 2px;
+  transition: opacity 280ms cubic-bezier(0.2, 0.8, 0.2, 1), transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), width 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sidebar-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-toggle:hover {
+  background: transparent;
+}
+
+.sidebar-toggle:focus-visible {
+  outline: 2px solid rgba(139, 124, 246, 0.5);
+  outline-offset: 2px;
+}
+
+.brand-subtitle,
+.eyebrow,
+.panel-subtitle,
+.panel-line,
+.status-strip {
+  color: var(--muted);
+}
+
+.panel-subtitle,
+.panel-line,
+.brand-subtitle,
+.select-wrap span,
+.metric-label {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.nav {
+  display: grid;
+  gap: 4px;
+}
+
+.nav-icon {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  color: inherit;
+}
+
+.nav-icon svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+.nav-label {
+  transition: opacity 280ms cubic-bezier(0.2, 0.8, 0.2, 1), transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), width 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  min-height: 44px;
+  font-weight: 500;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease, padding 280ms, justify-content 280ms, gap 280ms;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.nav-item.active {
+  color: var(--text);
+  background: linear-gradient(180deg, rgba(139, 124, 246, 0.12), rgba(139, 124, 246, 0.05));
+  border-color: rgba(139, 124, 246, 0.3);
+}
+
+.nav-item.active .nav-icon {
+  color: #b6adff;
+}
+
+.sidebar-panel,
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.sidebar-panel {
+  padding: 16px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.avatar {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #2a2438, #1a1626);
+  border: 1px solid rgba(139, 124, 246, 0.35);
+  color: #c9c2ff;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.sidebar-user-meta {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  transition: opacity 280ms, transform 280ms, width 280ms;
+}
+
+.sidebar-user-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-user-role {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.logout-button {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 36px 40px;
+  display: grid;
+  gap: 28px;
+  align-content: start;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.topbar-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.select-wrap {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+select,
+button {
+  height: 42px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 0 14px;
+  font-size: 14px;
+  transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover {
+  border-color: #33404f;
+  background: #12171f;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+select:focus,
+input:focus,
+button:focus {
+  outline: none;
+  border-color: rgba(139, 124, 246, 0.55);
+  box-shadow: 0 0 0 3px rgba(139, 124, 246, 0.14);
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(139, 124, 246, 0.45);
+  background: linear-gradient(180deg, #8b7cf6, #7a6be8);
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  transition: filter 160ms ease, transform 120ms ease;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.btn-ghost:hover {
+  border-color: #33404f;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+button.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+button.ghost:hover {
+  color: var(--text);
+  border-color: #33404f;
+}
+
+.status-strip {
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-soft);
+  font-size: 14px;
+}
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+}
+
+.metric-card {
+  min-height: 132px;
+  padding: 22px;
+  border-radius: var(--radius);
+  background:
+    radial-gradient(600px 200px at 100% 0%, rgba(139, 124, 246, 0.06), transparent 60%),
+    linear-gradient(180deg, #161d26, #12161e);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.metric-card:hover {
+  border-color: #2d3845;
+  transform: translateY(-1px);
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.metric-value {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.metric-value.positive {
+  color: var(--green);
+}
+
+.metric-value.negative {
+  color: var(--red);
+}
+
+.metric-hint {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 24px;
+}
+
+.connections-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+  gap: 24px;
+}
+
+.compact-form {
+  gap: 12px;
+}
+
+.tutorial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.tutorial-card {
+  min-height: 140px;
+  padding: 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  display: grid;
+  gap: 10px;
+}
+
+.tutorial-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.tutorial-step {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(139, 124, 246, 0.4);
+  background: rgba(139, 124, 246, 0.1);
+  color: #b6adff;
+  font-weight: 700;
+  font-family: var(--font-display);
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+}
+
+.info-card {
+  min-height: 108px;
+  padding: 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  display: grid;
+  gap: 6px;
+}
+
+.info-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.info-card strong {
+  font-size: 22px;
+  font-family: var(--font-display);
+}
+
+.panel {
+  padding: 24px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.panel-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.empty-state {
+  padding: 22px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed #33414f;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+  text-align: center;
+}
+
+/* Login */
+.login-shell {
+  position: fixed;
+  inset: 0;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(900px 500px at 10% 0%, rgba(139, 124, 246, 0.1), transparent 60%),
+    radial-gradient(700px 400px at 100% 100%, rgba(110, 168, 254, 0.07), transparent 55%),
+    #07090d;
+  z-index: 50;
+}
+
+.login-shell.visible {
+  display: grid;
+}
+
+.login-panel {
+  width: min(920px, 100%);
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(13, 17, 23, 0.9);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.login-side {
+  padding: 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background:
+    radial-gradient(600px 300px at 0% 0%, rgba(139, 124, 246, 0.08), transparent 60%),
+    rgba(17, 22, 29, 0.6);
+  border-right: 1px solid var(--border-soft);
+}
+
+.login-side h2 {
+  margin: 18px 0 0;
+  font-size: 34px;
+  line-height: 1.1;
+}
+
+.login-side-copy {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+  max-width: 40ch;
+}
+
+.login-benefits {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 12px;
+}
+
+.login-benefits li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.benefit-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px rgba(61, 220, 132, 0.5);
+}
+
+.login-form-wrap {
+  padding: 48px;
+  display: grid;
+  align-content: center;
+}
+
+.login-brand {
+  margin-bottom: 6px;
+}
+
+.login-form h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+}
+
+.login-form,
+.stack-form,
+.inline-form,
+.settings-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.login-form label,
+.stack-form label,
+.inline-form label,
+.settings-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.login-form input,
+.stack-form input,
+.inline-form input,
+.settings-grid input {
+  height: 44px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 0 14px;
+  font-size: 14px;
+}
+
+.login-form button[type="submit"] {
+  margin-top: 4px;
+  height: 44px;
+  background: linear-gradient(180deg, #8b7cf6, #7a6be8);
+  border: 1px solid rgba(139, 124, 246, 0.45);
+  color: #fff;
+  font-weight: 600;
+}
+
+.login-error {
+  margin-top: 12px;
+  color: var(--red);
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 14px;
+}
+
+/* Funnel */
+.funnel-chart {
+  display: grid;
+  gap: 16px;
+}
+
+.funnel-stage {
+  position: relative;
+  display: grid;
+  gap: 8px;
+}
+
+.funnel-bar {
+  height: 56px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  color: #fff;
+  font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: width 400ms ease;
+}
+
+.funnel-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.funnel-count {
+  font-weight: 700;
+  font-family: var(--font-display);
+}
+
+/* Status pills */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pill.ok {
+  color: var(--green);
+  border-color: rgba(61, 220, 132, 0.35);
+  background: rgba(61, 220, 132, 0.08);
+}
+
+.status-pill.warn {
+  color: var(--yellow);
+  border-color: rgba(255, 209, 102, 0.35);
+  background: rgba(255, 209, 102, 0.08);
+}
+
+.status-pill.off {
+  color: var(--muted);
+}
+
+/* Connections */
+.connections-hero {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  align-items: center;
+  padding: 32px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(700px 300px at 0% 0%, rgba(139, 124, 246, 0.09), transparent 60%),
+    var(--panel);
+}
+
+.connections-hero-copy h3 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+.connections-hero-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+  max-width: 56ch;
+}
+
+.connections-progress {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.progress-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-step {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 700;
+  font-family: var(--font-display);
+  background: var(--bg-2);
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
+}
+
+.progress-step.done {
+  border-color: rgba(61, 220, 132, 0.5);
+  background: rgba(61, 220, 132, 0.12);
+  color: var(--green);
+}
+
+.progress-line {
+  width: 48px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 200ms ease;
+}
+
+.progress-line.done {
+  background: var(--green);
+}
+
+.progress-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.connection-card {
+  padding: 24px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  display: grid;
+  gap: 18px;
+  transition: border-color 160ms ease;
+}
+
+.connection-card.is-connected {
+  border-color: rgba(61, 220, 132, 0.28);
+}
+
+.connection-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.connection-logo {
+  flex: 0 0 46px;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #2a2438, #1a1626);
+  border: 1px solid rgba(139, 124, 246, 0.35);
+  color: #c9c2ff;
+  font-weight: 700;
+  font-size: 20px;
+  font-family: var(--font-display);
+}
+
+.connection-card-title {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+}
+
+.connection-name {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.connection-desc {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.connection-card-body {
+  display: grid;
+  gap: 14px;
+}
+
+.connection-line {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.connection-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* Advanced details */
+.advanced-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.advanced-section summary {
+  padding: 18px 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+
+.advanced-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-section summary:hover {
+  color: var(--text);
+}
+
+.advanced-caret {
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 200ms ease;
+  margin-top: -4px;
+}
+
+.advanced-section[open] .advanced-caret {
+  transform: rotate(-135deg);
+  margin-top: 4px;
+}
+
+.advanced-body {
+  padding: 0 24px 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 20px;
+}
+
+.form-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+}
+
+/* Onboarding */
+.onboarding {
+  position: relative;
+  padding: 48px;
+  border-radius: var(--radius);
+  border: 1px dashed #33414f;
+  background: rgba(255, 255, 255, 0.015);
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.onboarding-orb {
+  width: 120px;
+  height: 120px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 35%, rgba(139, 124, 246, 0.5), transparent 70%),
+    radial-gradient(circle at 65% 65%, rgba(110, 168, 254, 0.35), transparent 70%);
+  filter: blur(2px);
+  animation: orb-pulse 4s ease-in-out infinite;
+}
+
+@keyframes orb-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+.onboarding h3 {
+  margin: 0;
+  font-size: 26px;
+}
+
+.onboarding p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+  max-width: 48ch;
+}
+
+.onboarding-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 14px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+@media (max-width: 1100px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    flex-basis: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .chart-grid,
+  .cards-grid,
+  .connections-layout,
+  .tutorial-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .login-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .login-side {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .connections-hero {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .content {
+    padding: 24px 18px;
+  }
+
+  .login-side {
+    padding: 32px 24px;
+  }
+
+  .login-form-wrap {
+    padding: 32px 24px;
+  }
+}
+
+
+# ============================================================
+# ARQUIVO: frontend/.env.example
+# CAMINHO: frontend/.env.example
+# ============================================================
+# TrackROI Frontend - VariÃ¡veis de ambiente
+# Copie este arquivo para .env e preencha os valores.
+
+# Porta do servidor estÃ¡tico do frontend
+PORT=5180
+
+# URL base da API
+API_BASE=http://localhost:4100
+
+

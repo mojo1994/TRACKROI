@@ -76,7 +76,7 @@ function createUserRecord({ name, email, password, role = "admin" }) {
 
 function createEmptyState() {
   return {
-    users: [],
+    users: [createDefaultUser()],
     sessions: [],
     clicks: [],
     checkouts: [],

@@ -18,7 +18,6 @@ const sidebarIcons = {
   funnel: iconFunnel(),
   metrics: iconMetrics(),
   products: iconProducts(),
-  tools: iconTools(),
   connections: iconConnections(),
   settings: iconSettings(),
   logs: iconLogs(),
@@ -26,7 +25,7 @@ const sidebarIcons = {
 };
 
 function normalizeRoute(route) {
-  const allowed = new Set(["dashboard", "sales", "funnel", "metrics", "products", "tools", "connections", "settings", "logs"]);
+  const allowed = new Set(["dashboard", "sales", "funnel", "metrics", "products", "connections", "settings", "logs"]);
   return allowed.has(route) ? route : "dashboard";
 }
 
@@ -56,6 +55,19 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 async function apiFetch(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -72,7 +84,7 @@ async function apiFetch(path, options = {}) {
       headers,
     });
   } catch (networkError) {
-    throw new Error("Não foi possível conectar ao backend. Verifique se ele está rodando na porta 4000.");
+    throw new Error("Não foi possível conectar. Verifique sua internet e tente novamente.");
   }
   if (response.status === 401) {
     state.token = "";
@@ -91,14 +103,17 @@ async function apiFetch(path, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(body.error || `Request failed: ${response.status}`);
+    throw new Error(body.error || `Erro ao processar a solicitação`);
   }
   return body;
 }
 
 function setStatus(message) {
   const node = el("status-strip");
-  if (node) node.textContent = message;
+  if (node) {
+    node.hidden = !message;
+    node.textContent = message || "";
+  }
 }
 
 function setLoginError(message) {
@@ -107,39 +122,22 @@ function setLoginError(message) {
   node.textContent = message || "";
 }
 
-function setRegisterError(message) {
-  const node = el("register-error");
-  node.hidden = !message;
-  node.textContent = message || "";
-}
-
-function showAuthScreen(screen) {
-  const loginView = el("login-view");
-  const registerView = el("register-view");
-  if (loginView) loginView.classList.toggle("visible", screen === "login");
-  if (registerView) registerView.classList.toggle("visible", screen === "register");
-}
-
 function showLogin() {
-  showAuthScreen("login");
-  el("app-view").classList.add("locked");
+  const app = el("app-view");
+  if (app) app.hidden = true;
+  const login = el("login-view");
+  if (login) login.classList.add("visible");
   el("email-input").value = "";
   el("password-input").value = "";
-  renderLockedPage();
-}
-
-function showRegister() {
-  showAuthScreen("register");
-  el("register-name").value = "";
-  el("register-email").value = "";
-  el("register-password").value = "";
-  el("register-password-confirm").value = "";
 }
 
 function showApp() {
-  showAuthScreen("");
-  el("app-view").classList.remove("locked");
+  const app = el("app-view");
+  if (app) app.hidden = false;
+  const login = el("login-view");
+  if (login) login.classList.remove("visible");
   applySidebarState();
+  updateSidebarUser();
 }
 
 function setRoute(route) {
@@ -162,6 +160,17 @@ function applySidebarState() {
   localStorage.setItem("trackroi_sidebar_expanded", state.sidebarExpanded ? "1" : "0");
 }
 
+function updateSidebarUser() {
+  const name = el("sidebar-user-name");
+  const role = el("sidebar-user-role");
+  const avatar = el("sidebar-avatar");
+  if (state.user) {
+    if (name) name.textContent = state.user.name || "Usuário";
+    if (role) role.textContent = state.user.role === "admin" ? "Administrador" : "Membro";
+    if (avatar) avatar.textContent = (state.user.name || "U").charAt(0).toUpperCase();
+  }
+}
+
 function mountSidebarIcons() {
   document.querySelectorAll(".nav-icon").forEach((node) => {
     const key = node.dataset.icon;
@@ -175,10 +184,12 @@ function renderMetricCards(cards) {
       ${cards
         .map((card) => {
           const toneClass = card.tone === "positive" ? "positive" : card.tone === "negative" ? "negative" : "";
+          const hint = card.hint ? `<div class="metric-hint">${escapeHtml(card.hint)}</div>` : "";
           return `
             <article class="metric-card">
               <div class="metric-label">${escapeHtml(card.label)}</div>
               <div class="metric-value ${toneClass}">${escapeHtml(card.value)}</div>
+              ${hint}
             </article>
           `;
         })
@@ -189,32 +200,57 @@ function renderMetricCards(cards) {
 
 function funnelHtml(funnel) {
   if (!funnel || funnel.empty) {
-    return `<div class="empty-state">Nenhum dado ainda.</div>`;
+    return `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para começar.</div>`;
   }
   const max = Math.max(...funnel.stages.map((stage) => stage.count), 1);
+  const colors = ["#7c5cff", "#d24dd8", "#ff6b9d", "#ff5c7a"];
   return `
     <div class="funnel-chart">
       ${funnel.stages
         .map((stage, index) => {
-          const ratio = funnel.stages.length <= 1 ? 0 : index / (funnel.stages.length - 1);
-          const hue = 290 - ratio * 80;
-          const nextHue = hue - 18;
-          const width = Math.max(28, Math.round((stage.count / max) * 100));
+          const color = colors[Math.min(index, colors.length - 1)];
+          const width = Math.max(30, Math.round((stage.count / max) * 100));
           return `
             <div class="funnel-stage">
-              <div class="funnel-bar" style="width:${width}%; background: linear-gradient(90deg, hsl(${hue} 78% 56%) 0%, hsl(${nextHue} 82% 48%) 100%);">
+              <div class="funnel-bar" style="width:${width}%; background: linear-gradient(90deg, ${color} 0%, ${color}cc 100%); box-shadow: 0 0 18px ${color}40;">
                 <span>${escapeHtml(stage.label)}</span>
                 <span class="funnel-count">${stage.count}</span>
               </div>
               <div class="funnel-meta">
-                <span>Conversão vs etapa anterior: ${percent(stage.conversion)}</span>
-                <span>vs primeiro estágio: ${percent(stage.firstStageConversion)}</span>
+                <span>${stage.conversion == null ? "—" : `${percent(stage.conversion)} entre etapas`}</span>
+                <span>${stage.firstStageConversion == null ? "—" : `${percent(stage.firstStageConversion)} do total`}</span>
               </div>
             </div>
           `;
         })
         .join("")}
     </div>
+  `;
+}
+
+function statusPill(status) {
+  const map = {
+    connected: ["Conectado", "ok"],
+    not_connected: ["Desconectado", "off"],
+    needs_reconnect: ["Precisa atenção", "warn"],
+    configured: ["Configurado", "ok"],
+    not_configured: ["Não configurado", "off"],
+  };
+  const [label, tone] = map[status] || [status || "—", "off"];
+  return `<span class="status-pill ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function sectionPanel(title, subtitle, body) {
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">${escapeHtml(title)}</div>
+          ${subtitle ? `<div class="panel-subtitle">${escapeHtml(subtitle)}</div>` : ""}
+        </div>
+      </div>
+      ${body}
+    </section>
   `;
 }
 
@@ -234,50 +270,16 @@ function tableHtml(headers, rows) {
   `;
 }
 
-function integrationCards(integrations) {
-  if (!integrations) return "";
-  const items = [
-    {
-      name: "Meta Ads",
-      status: integrations.meta.status,
-      detail: integrations.meta.connectedAccount || "Nenhuma conta conectada",
-      extra: integrations.meta.lastSyncAt ? `Última sincronização: ${integrations.meta.lastSyncAt}` : "Sincronização ainda não configurada",
-    },
-    {
-      name: "Perfect Pay",
-      status: integrations.perfectPay.status,
-      detail: integrations.perfectPay.webhookUrl,
-      extra: integrations.perfectPay.lastReceivedEventAt ? `Último evento: ${integrations.perfectPay.lastReceivedEventAt}` : "Webhook ainda não recebido",
-    },
-  ];
-  return `
-    <div class="integration-list">
-      ${items
-        .map(
-          (item) => `
-            <article class="integration-card">
-              <div class="integration-name">${escapeHtml(item.name)}</div>
-              <div class="integration-badge">${escapeHtml(item.status)}</div>
-              <div class="panel-line">${escapeHtml(item.detail)}</div>
-              <div class="panel-line">${escapeHtml(item.extra)}</div>
-            </article>
-          `,
-        )
-        .join("")}
-    </div>
-  `;
-}
-
 function pageControls(route) {
   const controls = el("page-controls");
   if (!controls) return;
-  const refresh = `<button id="refresh-button" type="button">Atualizar</button>`;
+  const refresh = `<button id="refresh-button" type="button" class="ghost">Atualizar</button>`;
   const sourceSelect = `
     <label class="select-wrap">
-      <span>Fonte</span>
+      <span>Tráfego</span>
       <select id="source-filter">
-        <option value="all" ${state.source === "all" ? "selected" : ""}>Todas</option>
-        <option value="direct" ${state.source === "direct" ? "selected" : ""}>Tráfego Direto</option>
+        <option value="all" ${state.source === "all" ? "selected" : ""}>Tudo</option>
+        <option value="direct" ${state.source === "direct" ? "selected" : ""}>Direto</option>
         <option value="meta" ${state.source === "meta" ? "selected" : ""}>Meta</option>
       </select>
     </label>
@@ -288,7 +290,6 @@ function pageControls(route) {
     sales: refresh,
     metrics: refresh,
     products: `<button id="product-create-button" type="button">Novo produto</button>${refresh}`,
-    tools: refresh,
     connections: refresh,
     settings: `<button id="save-settings-button" type="button">Salvar</button>${refresh}`,
     logs: refresh,
@@ -302,106 +303,100 @@ function integrationConnectUrl(provider) {
 
 function pageTitle(route) {
   const titles = {
-    dashboard: ["Dashboard", "Resumo operacional"],
+    dashboard: ["Dashboard", "Resumo geral"],
     sales: ["Vendas", "Pedidos e eventos de pagamento"],
     funnel: ["Funil", "Conversão por etapa"],
     metrics: ["Métricas", "Resumo financeiro e operacional"],
     products: ["Produtos", "Catálogo e preços"],
-    tools: ["Ferramentas", "Ações operacionais locais"],
-    connections: ["Conexões e Rastreamento", "Meta Ads e Perfect Pay"],
-    settings: ["Configurações", "Preferências do sistema"],
-    logs: ["Logs", "Webhooks e auditoria"],
+    connections: ["Conexões", "Conecte suas ferramentas"],
+    settings: ["Configurações", "Preferências da conta"],
+    logs: ["Logs", "Histórico de eventos"],
   };
   const [eyebrow, title] = titles[route];
   el("page-eyebrow").textContent = eyebrow;
   el("page-title").textContent = title;
 }
 
-function dashboardPage(data) {
+function emptyDashboard() {
   return `
-    ${renderMetricCards(data.cards)}
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Funil de conversão</div>
-          <div class="panel-subtitle">Dados reais, sem placeholders.</div>
-        </div>
+    <section class="onboarding">
+      <div class="onboarding-orb"></div>
+      <h3>Bem-vindo ao TrackROI</h3>
+      <p>Conecte suas ferramentas de anúncios e pagamento e o seu painel começa a se preencher automaticamente.</p>
+      <div class="onboarding-actions">
+        <a class="btn-primary" href="#connections">Configurar conexões</a>
+        <a class="btn-ghost" href="#metrics">Ver métricas</a>
       </div>
-      ${funnelHtml(data.funnel)}
     </section>
   `;
+}
+
+function dashboardPage(data) {
+  const hasData = data && data.empty === false;
+  const body = hasData
+    ? `
+      ${renderMetricCards(data.cards || [])}
+      ${sectionPanel("Funil de conversão", "Cliques, visitas, checkouts e vendas.", funnelHtml(data.funnel))}
+    `
+    : emptyDashboard();
+  return body;
 }
 
 function salesTable(items) {
   const rows = items.map((sale) => `
     <tr>
-      <td>${escapeHtml(sale.id)}</td>
-      <td>${escapeHtml(sale.status)}</td>
-      <td>${escapeHtml(sale.gateway)}</td>
+      <td>${escapeHtml(sale.gateway === "perfectpay" ? "Perfect Pay" : sale.gateway)}</td>
+      <td><span class="status-pill ${sale.status === "approved" ? "ok" : sale.status === "refunded" || sale.status === "chargeback" ? "warn" : "off"}">${escapeHtml(sale.status)}</span></td>
       <td>${escapeHtml(money(sale.amountCents || 0))}</td>
-      <td>${escapeHtml(sale.gatewayTransactionId)}</td>
-      <td>${escapeHtml(sale.createdAt)}</td>
+      <td>${escapeHtml(sale.gatewayTransactionId || "—")}</td>
+      <td>${escapeHtml(formatDateTime(sale.createdAt))}</td>
     </tr>
   `);
-  return tableHtml(["ID", "Status", "Gateway", "Valor", "Transação", "Criada em"], rows);
+  return tableHtml(["Pagamento", "Status", "Valor", "Transação", "Data"], rows);
 }
 
 function salesPage(data) {
-  return `
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Vendas</div>
-          <div class="panel-subtitle">Somente registros persistidos no backend.</div>
-        </div>
-      </div>
-      ${salesTable(data.sales)}
-    </section>
-  `;
+  return sectionPanel("Vendas", "Todas as vendas registradas automaticamente.", salesTable(data.sales || []));
 }
 
 function funnelPage(data) {
+  const hasData = data && data.empty === false;
+  const body = hasData
+    ? funnelHtml(data.funnel)
+    : `<div class="empty-state">Nenhum dado ainda. Conecte suas ferramentas para começar.</div>`;
+  return sectionPanel("Funil", "Acompanhe a conversão em cada etapa.", body);
+}
+
+function metricsSummary(summary) {
+  const items = [
+    ["Cliques", summary.clickCount],
+    ["Checkouts iniciados", summary.checkoutCount],
+    ["Vendas aprovadas", summary.approvedSales],
+    ["Pendentes", summary.pendingSales],
+    ["AOV (ticket médio)", summary.aov == null ? "—" : money(summary.aov * 100)],
+    ["Taxa de conversão", percent(summary.cvr != null ? summary.cvr * 100 : null)],
+  ];
   return `
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Funil</div>
-          <div class="panel-subtitle">Cliques, visitas, checkout e vendas reais.</div>
-        </div>
-      </div>
-      ${funnelHtml(data.funnel)}
-    </section>
+    <div class="info-grid">
+      ${items.map(([label, value]) => `<div class="info-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
+    </div>
   `;
 }
 
 function metricsPage(data) {
-  const summary = data.summary;
+  const summary = data.summary || {};
   return `
-    ${renderMetricCards(data.cards)}
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Resumo detalhado</div>
-          <div class="panel-subtitle">Indicadores derivados do estado atual.</div>
-        </div>
-      </div>
-      <div class="info-grid">
-        <div class="info-card"><span>Cliques</span><strong>${summary.clickCount}</strong></div>
-        <div class="info-card"><span>Checkouts</span><strong>${summary.checkoutCount}</strong></div>
-        <div class="info-card"><span>Vendas aprovadas</span><strong>${summary.approvedSales}</strong></div>
-        <div class="info-card"><span>AOV</span><strong>${summary.aov == null ? "—" : money(summary.aov * 100)}</strong></div>
-      </div>
-    </section>
+    ${renderMetricCards(data.cards || [])}
+    ${sectionPanel("Resumo detalhado", "Indicadores calculados automaticamente.", metricsSummary(summary))}
   `;
 }
 
 function productsPage(data) {
-  const rows = data.products.map((product) => `
+  const rows = (data.products || []).map((product) => `
     <tr>
-      <td>${escapeHtml(product.id)}</td>
       <td>${escapeHtml(product.name)}</td>
       <td>${escapeHtml(money(product.priceCents || 0))}</td>
-      <td>${escapeHtml(product.createdAt)}</td>
+      <td>${formatDateTime(product.createdAt)}</td>
     </tr>
   `);
   return `
@@ -409,228 +404,185 @@ function productsPage(data) {
       <div class="panel-header">
         <div>
           <div class="panel-title">Produtos</div>
-          <div class="panel-subtitle">Cadastro persistido no backend.</div>
+          <div class="panel-subtitle">Cadastre os produtos do seu catálogo.</div>
         </div>
       </div>
       <form id="product-form" class="inline-form">
         <label><span>Nome</span><input id="product-name" type="text" /></label>
-        <label><span>Preço em centavos</span><input id="product-price" type="number" min="0" step="1" /></label>
+        <label><span>Preço (R$)</span><input id="product-price" type="number" min="0" step="0.01" placeholder="19,90" /></label>
+        <button type="submit">Adicionar</button>
       </form>
-      ${tableHtml(["ID", "Nome", "Preço", "Criado em"], rows)}
+      ${tableHtml(["Produto", "Preço", "Criado em"], rows)}
     </section>
   `;
 }
 
-function toolsPage() {
+function connectionCard({ provider, name, description, status, detail, connectUrl }) {
+  const connected = status === "connected" || status === "configured";
   return `
-    <section class="chart-grid">
-      <article class="panel">
-        <div class="panel-header"><div><div class="panel-title">Clique manual</div><div class="panel-subtitle">Ferramenta local para testar tracking.</div></div></div>
-        <form id="click-form" class="stack-form">
-          <label><span>trackroi_click_id</span><input id="click-trackroi" type="text" /></label>
-          <label><span>Fonte</span><input id="click-source" type="text" value="direct" /></label>
-          <button type="submit">Registrar clique</button>
-        </form>
-      </article>
-      <article class="panel">
-        <div class="panel-header"><div><div class="panel-title">Webhook de teste</div><div class="panel-subtitle">Envia um evento local para o backend.</div></div></div>
-        <form id="webhook-form" class="stack-form">
-          <label><span>Transaction ID</span><input id="webhook-transaction" type="text" /></label>
-          <label><span>Event type</span><input id="webhook-event" type="text" value="approved" /></label>
-          <label><span>Valor em centavos</span><input id="webhook-amount" type="number" min="0" step="1" /></label>
-          <button type="submit">Enviar webhook</button>
-        </form>
-      </article>
-    </section>
-    <section class="panel">
-      <div class="panel-header"><div><div class="panel-title">Lançar investimento</div><div class="panel-subtitle">Registra spend local para teste do ROAS/ROI.</div></div></div>
-      <form id="spend-form" class="stack-form">
-        <label><span>Fonte</span><input id="spend-source" type="text" value="meta" /></label>
-        <label><span>Valor em centavos</span><input id="spend-amount" type="number" min="0" step="1" /></label>
-        <button type="submit">Registrar investimento</button>
-      </form>
-    </section>
+    <article class="connection-card ${connected ? "is-connected" : ""}">
+      <div class="connection-card-head">
+        <div class="connection-logo">${name.charAt(0)}</div>
+        <div class="connection-card-title">
+          <div class="connection-name">${escapeHtml(name)}</div>
+          <div class="connection-desc">${escapeHtml(description)}</div>
+        </div>
+        ${statusPill(status)}
+      </div>
+      <div class="connection-card-body">
+        <div class="connection-line">${escapeHtml(detail || (connected ? "Tudo pronto." : "Sua ferramenta ainda não está conectada."))}</div>
+        <div class="connection-actions">
+          <a class="btn-primary" href="${connectUrl}" target="_blank" rel="noreferrer">
+            ${connected ? "Gerenciar" : "Conectar"}
+          </a>
+        </div>
+      </div>
+    </article>
   `;
 }
 
 function connectionsPage(data) {
-  const meta = data.integrations?.meta || {};
-  const perfectPay = data.integrations?.perfectPay || {};
-  const metaAuthUrl = "https://www.facebook.com/v22.0/dialog/oauth";
-  const metaTokenUrl = "https://graph.facebook.com/v22.0/oauth/access_token";
-  const perfectPayLoginUrl = "https://app.perfectpay.com.br/api/auth/login";
-  const perfectPayPortalUrl = "https://app.perfectpay.com.br/br/login";
-  return `
-    <section class="panel connections-hero">
-      <div class="panel-header connections-header">
-        <div>
-          <div class="panel-title title-with-icon">
-            <span class="title-icon">${iconGear()}</span>
-            <span>Conexões e Rastreamento</span>
-          </div>
-          <div class="panel-subtitle">Atalhos automáticos e configuração manual lado a lado.</div>
-        </div>
-        <div class="connections-quick-links">
-          <a class="quick-link" href="${integrationConnectUrl("meta")}" target="_blank" rel="noreferrer">
-            <span class="quick-link-icon">${iconGear()}</span>
-            <span>Conectar Meta Ads</span>
-          </a>
-          <a class="quick-link" href="${integrationConnectUrl("perfectpay")}" target="_blank" rel="noreferrer">
-            <span class="quick-link-icon">${iconGear()}</span>
-            <span>Conectar Perfect Pay</span>
-          </a>
-        </div>
-        <div class="connections-links">
-          <article class="link-card">
-            <div class="shortcut-topline">Meta Ads</div>
-            <strong>OAuth real</strong>
-            <a href="${metaAuthUrl}" target="_blank" rel="noreferrer">${metaAuthUrl}</a>
-            <a href="${metaTokenUrl}" target="_blank" rel="noreferrer">${metaTokenUrl}</a>
-          </article>
-          <article class="link-card">
-            <div class="shortcut-topline">Perfect Pay</div>
-            <strong>Login e API</strong>
-            <a href="${perfectPayLoginUrl}" target="_blank" rel="noreferrer">${perfectPayLoginUrl}</a>
-            <a href="${perfectPayPortalUrl}" target="_blank" rel="noreferrer">${perfectPayPortalUrl}</a>
-          </article>
-        </div>
+  const integrations = data.integrations || {};
+  const meta = integrations.meta || {};
+  const perfectPay = integrations.perfectPay || {};
+
+  const metaConnected = meta.status === "connected";
+  const ppConnected = perfectPay.status === "connected" || perfectPay.apiStatus === "connected";
+
+  const hero = `
+    <section class="connections-hero">
+      <div class="connections-hero-copy">
+        <h3>Conecte suas ferramentas</h3>
+        <p>Vincule seus anúncios e sua plataforma de pagamento. Depois de conectar, os dados entram sozinhos — sem trabalho manual.</p>
       </div>
-      <div class="shortcut-grid">
-        <article class="shortcut-card">
-          <div class="shortcut-topline">Meta Ads</div>
-          <strong>Fluxo automático</strong>
-          <p>Abre o login da Meta com o backend preparado para receber o callback e salvar o token.</p>
-          <a class="shortcut-button" href="${integrationConnectUrl("meta")}" target="_blank" rel="noreferrer">Abrir autorização</a>
-        </article>
-        <article class="shortcut-card">
-          <div class="shortcut-topline">Perfect Pay</div>
-          <strong>Token e webhook</strong>
-          <p>Abre o helper do backend para validar a conta e conectar a API da Perfect Pay sem remover o setup manual.</p>
-          <a class="shortcut-button" href="${integrationConnectUrl("perfectpay")}" target="_blank" rel="noreferrer">Abrir conexão</a>
-        </article>
+      <div class="connections-progress">
+        <div class="progress-steps">
+          <span class="progress-step ${metaConnected ? "done" : ""}">${metaConnected ? "✓" : "1"}</span>
+          <span class="progress-line ${metaConnected ? "done" : ""}"></span>
+          <span class="progress-step ${ppConnected ? "done" : ""}">${ppConnected ? "✓" : "2"}</span>
+        </div>
+        <div class="progress-label">${metaConnected && ppConnected ? "Tudo pronto!" : "Faltam " + ((metaConnected ? 0 : 1) + (ppConnected ? 0 : 1)) + " conexões"}</div>
       </div>
     </section>
+  `;
+
+  const cards = `
     <section class="connections-layout">
-      <article class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="panel-title">Conexão Meta</div>
-            <div class="panel-subtitle">Só o básico para puxar contas e vendas atribuídas.</div>
-          </div>
-        </div>
-        <div class="integration-note">Se preferir, use o atalho automático acima para autenticar pelo backend. O formulário manual continua disponível aqui.</div>
+      ${connectionCard({
+        provider: "meta",
+        name: "Meta Ads",
+        description: "Importe gastos, campanhas e resultados dos seus anúncios.",
+        status: meta.status,
+        detail: metaConnected ? `Conectado${meta.connectedAccount ? ` — ${meta.connectedAccount}` : ""}` : "Ainda não conectado.",
+        connectUrl: integrationConnectUrl("meta"),
+      })}
+      ${connectionCard({
+        provider: "perfectpay",
+        name: "Perfect Pay",
+        description: "Receba suas vendas aprovadas automaticamente.",
+        status: perfectPay.apiStatus,
+        detail: ppConnected ? "Conectado e recebendo eventos." : "Ainda não conectado.",
+        connectUrl: integrationConnectUrl("perfectpay"),
+      })}
+    </section>
+  `;
+
+  const advanced = `
+    <details class="advanced-section">
+      <summary><span class="advanced-title">Configurações avançadas</span><span class="advanced-caret"></span></summary>
+      <div class="advanced-body">
         <form id="meta-connection-form" class="stack-form compact-form">
+          <div class="form-title">Meta Ads</div>
           <label><span>Status</span>
             <select id="meta-status">
               <option value="not_connected" ${meta.status === "not_connected" ? "selected" : ""}>Não conectado</option>
               <option value="connected" ${meta.status === "connected" ? "selected" : ""}>Conectado</option>
-              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa reconectar</option>
+              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
             </select>
           </label>
-          <label><span>Conta de anúncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
-          <label><span>Token</span><input id="meta-access-token" type="password" value="${escapeHtml(meta.accessToken || "")}" placeholder="Token de acesso" /></label>
+          <label><span>ID da conta de anúncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
           <button type="submit">Salvar Meta</button>
         </form>
-      </article>
-      <article class="panel">
-        <div class="panel-header">
-          <div>
-            <div class="panel-title">Rastreamento Perfect Pay</div>
-            <div class="panel-subtitle">Webhook público e segredo. É só isso para registrar vendas.</div>
-          </div>
-        </div>
-        <div class="integration-note">O atalho automático abre a validação de conta do backend. O webhook continua configurável manualmente.</div>
+
         <form id="perfectpay-connection-form" class="stack-form compact-form">
+          <div class="form-title">Perfect Pay</div>
           <label><span>Status</span>
             <select id="perfectpay-status">
               <option value="not_connected" ${perfectPay.status === "not_connected" ? "selected" : ""}>Não conectado</option>
               <option value="connected" ${perfectPay.status === "connected" ? "selected" : ""}>Conectado</option>
-              <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa reconectar</option>
+              <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
             </select>
           </label>
-          <label><span>Webhook URL</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
-          <label><span>Segredo</span><input id="perfectpay-webhook-secret" type="password" value="${escapeHtml(perfectPay.webhookSecret || "")}" placeholder="Segredo compartilhado" /></label>
+          <label><span>URL de eventos</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
+          <label><span>Segredo compartilhado</span><input id="perfectpay-webhook-secret" type="password" value="${escapeHtml(perfectPay.webhookSecret || "")}" placeholder="Segredo" /></label>
           <button type="submit">Salvar Perfect Pay</button>
         </form>
-      </article>
-    </section>
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Tutorial rápido</div>
-          <div class="panel-subtitle">Como conectar os dois sem complicar.</div>
-        </div>
       </div>
-      <div class="tutorial-grid">
-        <div class="tutorial-card">
-          <div class="tutorial-step">1</div>
-          <strong>Meta Ads</strong>
-          <p>Use o atalho automático para autorizar o app e depois ajuste a conta de anúncios se necessário.</p>
-        </div>
-        <div class="tutorial-card">
-          <div class="tutorial-step">2</div>
-          <strong>Perfect Pay</strong>
-          <p>Abra o helper do backend, valide a conta e então mantenha o webhook apontado para este sistema.</p>
-        </div>
-        <div class="tutorial-card">
-          <div class="tutorial-step">3</div>
-          <strong>Teste</strong>
-          <p>Depois de conectar, envie um webhook de teste para conferir se a venda aparece em Vendas e no dashboard.</p>
-        </div>
-      </div>
-    </section>
+    </details>
   `;
+
+  const guide = sectionPanel(
+    "Como funciona",
+    "Três passos simples para começar.",
+    `
+    <div class="tutorial-grid">
+      <div class="tutorial-card">
+        <div class="tutorial-step">1</div>
+        <strong>Conecte o Meta Ads</strong>
+        <p>Clique em "Conectar" e autorize o acesso na janela que abrir.</p>
+      </div>
+      <div class="tutorial-card">
+        <div class="tutorial-step">2</div>
+        <strong>Conecte o Perfect Pay</strong>
+        <p>Repita o mesmo processo para receber suas vendas.</p>
+      </div>
+      <div class="tutorial-card">
+        <div class="tutorial-step">3</div>
+        <strong>Acompanhe os resultados</strong>
+        <p>O dashboard passa a mostrar vendas, investimento e ROAS em tempo real.</p>
+      </div>
+    </div>
+    `
+  );
+
+  return `${hero}${cards}${advanced}${guide}`;
 }
 
 function settingsPage(data) {
   const settings = data.settings;
-  return `
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Configurações</div>
-          <div class="panel-subtitle">Persistidas no backend local.</div>
-        </div>
-      </div>
-      <form id="settings-form" class="settings-grid">
-        <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(settings.general.companyName)}" /></label>
-        <label><span>Timezone</span><input id="timezone" type="text" value="${escapeHtml(settings.general.timezone)}" /></label>
-        <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(settings.general.currency)}" /></label>
-        <label><span>Tema</span><input id="theme" type="text" value="${escapeHtml(settings.appearance.theme)}" /></label>
-      </form>
-    </section>
-  `;
+  return sectionPanel(
+    "Configurações",
+    "Preferências da sua conta.",
+    `
+    <form id="settings-form" class="settings-grid">
+      <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(settings.general.companyName)}" /></label>
+      <label><span>Fuso horário</span><input id="timezone" type="text" value="${escapeHtml(settings.general.timezone)}" /></label>
+      <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(settings.general.currency)}" /></label>
+    </form>
+    `
+  );
 }
 
 function logsPage(data) {
-  const webhooks = data.webhookEvents.map((item) => `
+  const webhooks = (data.webhookEvents || []).map((item) => `
     <tr>
-      <td>${escapeHtml(item.receivedAt)}</td>
+      <td>${escapeHtml(formatDateTime(item.receivedAt))}</td>
+      <td>${escapeHtml(item.gateway === "perfectpay" ? "Perfect Pay" : item.gateway)}</td>
       <td>${escapeHtml(item.eventType)}</td>
-      <td>${escapeHtml(item.transactionId)}</td>
-      <td>${escapeHtml(item.status)}</td>
-      <td>${escapeHtml(item.idempotencyKey)}</td>
+      <td><span class="status-pill ok">${escapeHtml(item.status)}</span></td>
     </tr>
   `);
-  const audits = data.auditLogs.map((item) => `
+  const audits = (data.auditLogs || []).map((item) => `
     <tr>
-      <td>${escapeHtml(item.timestamp)}</td>
+      <td>${escapeHtml(formatDateTime(item.timestamp))}</td>
       <td>${escapeHtml(item.action)}</td>
-      <td>${escapeHtml(item.resourceType)}</td>
-      <td>${escapeHtml(item.resourceId)}</td>
     </tr>
   `);
   return `
-    <section class="chart-grid">
-      <article class="panel">
-        <div class="panel-header"><div><div class="panel-title">Webhook events</div><div class="panel-subtitle">Payloads recebidos pelo sistema.</div></div></div>
-        ${tableHtml(["Quando", "Evento", "Transaction", "Status", "Idempotência"], webhooks)}
-      </article>
-      <article class="panel">
-        <div class="panel-header"><div><div class="panel-title">Audit log</div><div class="panel-subtitle">Ações sensíveis persistidas.</div></div></div>
-        ${tableHtml(["Quando", "Ação", "Recurso", "ID"], audits)}
-      </article>
-    </section>
+    <div class="chart-grid">
+      ${sectionPanel("Eventos recebidos", "Sincronizações das suas ferramentas conectadas.", tableHtml(["Data", "Ferramenta", "Evento", "Status"], webhooks))}
+      ${sectionPanel("Atividade da conta", "Ações realizadas no sistema.", tableHtml(["Data", "Ação"], audits))}
+    </div>
   `;
 }
 
@@ -646,29 +598,12 @@ function renderPage() {
     funnel: funnelPage,
     metrics: metricsPage,
     products: productsPage,
-    tools: toolsPage,
     connections: connectionsPage,
     settings: settingsPage,
     logs: logsPage,
   };
   root.innerHTML = renderers[state.route](data);
   attachPageHandlers();
-}
-
-function renderLockedPage() {
-  const root = el("page-root");
-  if (!root) return;
-  root.innerHTML = `
-    <section class="panel locked-panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Dashboard bloqueado</div>
-          <div class="panel-subtitle">Faça login para carregar os dados reais.</div>
-        </div>
-      </div>
-      <div class="empty-state">O dashboard está na mesma tela. O acesso aos dados será liberado após autenticação.</div>
-    </section>
-  `;
 }
 
 function attachPageHandlers() {
@@ -705,9 +640,10 @@ function attachPageHandlers() {
     productForm.onsubmit = async (event) => {
       event.preventDefault();
       const name = el("product-name").value.trim();
-      const priceCents = Number(el("product-price").value || 0);
+      const priceInput = el("product-price").value.replace(",", ".");
+      const price = Number(priceInput || 0);
       if (!name) return;
-      await apiFetch("/api/products", { method: "POST", body: JSON.stringify({ name, priceCents }) });
+      await apiFetch("/api/products", { method: "POST", body: JSON.stringify({ name, priceCents: Math.round(price * 100) }) });
       await loadDataAndRender();
     };
   }
@@ -721,10 +657,9 @@ function attachPageHandlers() {
         body: JSON.stringify({
           status: el("meta-status").value,
           adAccountId: el("meta-ad-account-id").value.trim(),
-          accessToken: el("meta-access-token").value.trim(),
-          lastSyncAt: new Date().toISOString(),
         }),
       });
+      setStatus("Configurações do Meta salvas.");
       await loadDataAndRender();
     };
   }
@@ -743,6 +678,7 @@ function attachPageHandlers() {
           apiStatus: "configured",
         }),
       });
+      setStatus("Configurações da Perfect Pay salvas.");
       await loadDataAndRender();
     };
   }
@@ -765,11 +701,9 @@ function attachPageHandlers() {
           timezone: el("timezone").value.trim(),
           currency: el("currency").value.trim(),
         },
-        appearance: {
-          theme: el("theme").value.trim(),
-        },
       };
       await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+      setStatus("Configurações salvas.");
       await loadDataAndRender();
     };
   }
@@ -781,64 +715,15 @@ function attachPageHandlers() {
       if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
     };
   }
-
-  const clickForm = el("click-form");
-  if (clickForm) {
-    clickForm.onsubmit = async (event) => {
-      event.preventDefault();
-      await apiFetch("/api/dev/click", {
-        method: "POST",
-        body: JSON.stringify({
-          trackroi_click_id: el("click-trackroi").value.trim(),
-          source: el("click-source").value.trim(),
-        }),
-      });
-      await loadDataAndRender();
-    };
-  }
-
-  const webhookForm = el("webhook-form");
-  if (webhookForm) {
-    webhookForm.onsubmit = async (event) => {
-      event.preventDefault();
-      await apiFetch("/api/webhooks/perfectpay", {
-        method: "POST",
-        body: JSON.stringify({
-          transaction_id: el("webhook-transaction").value.trim() || `tx_${Date.now()}`,
-          event_type: el("webhook-event").value.trim() || "approved",
-          amount_cents: Number(el("webhook-amount").value || 0),
-          currency: "BRL",
-        }),
-      });
-      await loadDataAndRender();
-    };
-  }
-
-  const spendForm = el("spend-form");
-  if (spendForm) {
-    spendForm.onsubmit = async (event) => {
-      event.preventDefault();
-      await apiFetch("/api/dev/spend", {
-        method: "POST",
-        body: JSON.stringify({
-          source: el("spend-source").value.trim(),
-          amountCents: Number(el("spend-amount").value || 0),
-        }),
-      });
-      await loadDataAndRender();
-    };
-  }
 }
 
 async function loadDataAndRender() {
   state.loading = true;
-  setStatus("Carregando dados...");
+  setStatus("");
   try {
-    const [dashboard, sales, clicks, checkouts, products, settings, integrations, auditLogs, webhookEvents] = await Promise.all([
+    const [dashboard, sales, products, settings, integrations, auditLogs, webhookEvents] = await Promise.all([
       apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
       apiFetch("/api/sales"),
-      apiFetch("/api/clicks"),
-      apiFetch("/api/checkouts"),
       apiFetch("/api/products"),
       apiFetch("/api/settings"),
       apiFetch("/api/integrations"),
@@ -849,8 +734,6 @@ async function loadDataAndRender() {
     state.data = {
       ...dashboard,
       sales: sales.items,
-      clicks: clicks.items,
-      checkouts: checkouts.items,
       products: products.items,
       settings: settings.settings,
       integrations: integrations.items,
@@ -859,14 +742,18 @@ async function loadDataAndRender() {
     };
     state.loading = false;
     renderPage();
-    setStatus(dashboard.empty ? "Nenhum dado real conectado ainda. O painel está exibindo um estado vazio honesto." : `Dados carregados: ${dashboard.summary.totalSales} vendas e ${dashboard.summary.clickCount} cliques.`);
+    if (dashboard.empty) {
+      setStatus("");
+    } else {
+      setStatus(`Tudo em dia: ${dashboard.summary.totalSales} vendas e ${dashboard.summary.clickCount} cliques rastreados.`);
+    }
   } catch (error) {
     state.loading = false;
     if (error.message === "AUTH_REQUIRED") {
       showLogin();
       return;
     }
-    setStatus(`Falha ao carregar dados: ${error.message}`);
+    setStatus(`Não foi possível atualizar os dados: ${error.message}`);
   }
 }
 
@@ -874,22 +761,6 @@ async function login(email, password) {
   const result = await apiFetch("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
-    headers: { "Content-Type": "application/json" },
-  });
-  state.token = result.token;
-  state.user = result.user;
-  state.csrfToken = result.csrfToken || "";
-  localStorage.setItem(TOKEN_KEY, result.token);
-  if (state.csrfToken) localStorage.setItem("trackroi_csrf", state.csrfToken);
-  showApp();
-  startPolling();
-  await loadDataAndRender();
-}
-
-async function register(name, email, password) {
-  const result = await apiFetch("/api/auth/register", {
-    method: "POST",
-    body: JSON.stringify({ name, email, password }),
     headers: { "Content-Type": "application/json" },
   });
   state.token = result.token;
@@ -930,44 +801,8 @@ async function bootstrap() {
     try {
       await login(el("email-input").value.trim(), el("password-input").value);
     } catch (error) {
-      setLoginError(error.message === "AUTH_REQUIRED" ? "Faça login novamente." : error.message);
+      setLoginError(error.message === "AUTH_REQUIRED" ? "Sessão expirada. Faça login novamente." : error.message);
     }
-  });
-
-  el("register-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    setRegisterError("");
-    const name = el("register-name").value.trim();
-    const email = el("register-email").value.trim();
-    const password = el("register-password").value;
-    const confirm = el("register-password-confirm").value;
-    if (!name || !email || !password) {
-      setRegisterError("Preencha todos os campos.");
-      return;
-    }
-    if (password.length < 6) {
-      setRegisterError("A senha deve ter pelo menos 6 caracteres.");
-      return;
-    }
-    if (password !== confirm) {
-      setRegisterError("As senhas não coincidem.");
-      return;
-    }
-    try {
-      await register(name, email, password);
-    } catch (error) {
-      setRegisterError(error.message === "AUTH_REQUIRED" ? "Faça login novamente." : error.message);
-    }
-  });
-
-  el("go-register").addEventListener("click", (event) => {
-    event.preventDefault();
-    showRegister();
-  });
-
-  el("go-login").addEventListener("click", (event) => {
-    event.preventDefault();
-    showLogin();
   });
 
   window.addEventListener("hashchange", async () => {
@@ -1001,19 +836,7 @@ async function bootstrap() {
     });
   }
 
-  let hasUsers = true;
-  try {
-    const status = await apiFetch("/api/auth/status");
-    hasUsers = Boolean(status.hasUsers);
-  } catch {
-    hasUsers = true;
-  }
-
-  if (hasUsers) {
-    showLogin();
-  } else {
-    showRegister();
-  }
+  showLogin();
 }
 
 function iconDashboard() {
@@ -1036,20 +859,12 @@ function iconProducts() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Zm0 2.2 5.9 2.9L12 11 6.1 8.1 12 5.2Zm-6 4 5 2.5v6.2l-5-2.5V9.2Zm7 8.7v-6.2l5-2.5v6.2l-5 2.5Z"/></svg>';
 }
 
-function iconTools() {
-  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a5 5 0 0 0-6.7 6.7L4 17v3h3l4-4a5 5 0 0 0 6.7-6.7l-2.8 2.8-2.1-.4-.4-2.1 2.3-2.3Zm-7.5 9.9-1.1 1.1v.7h.7l1.1-1.1-.7-.7Z"/></svg>';
-}
-
 function iconConnections() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4a4 4 0 0 0-3.7 5.5L12 18.2l8.7-8.7A4 4 0 0 0 17 4a3.9 3.9 0 0 0-3 1.4L12 8.1 10 5.4A3.9 3.9 0 0 0 7 4Zm0 2a2 2 0 0 1 1.6.8L12 11.7l3.4-4.9A2 2 0 0 1 19 7a2 2 0 0 1-.6 1.4L12 14.8 5.6 8.4A2 2 0 0 1 7 6Z"/></svg>';
 }
 
 function iconSettings() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.2 2.7 3 .6 1.7 2.4-1.1 2.9 1.1 2.9-1.7 2.4-3 .6L12 22l-1.2-2.7-3-.6-1.7-2.4 1.1-2.9-1.1-2.9 1.7-2.4 3-.6L12 2Zm0 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/></svg>';
-}
-
-function iconGear() {
-  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 1.75 1.08 2.42 2.56.5 1.5 2.14-.83 2.52.83 2.51-1.5 2.15-2.56.5L12 16.25l-1.08-2.26-2.56-.5-1.5-2.15.83-2.51-.83-2.52 1.5-2.14 2.56-.5L12 1.75Zm0 5.25a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>';
 }
 
 function iconLogs() {

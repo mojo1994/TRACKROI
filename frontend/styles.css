@@ -1436,3 +1436,93 @@ td {
     padding: 32px 24px;
   }
 }
+
+/* ---------------------------------------------------------------- States */
+
+button:disabled,
+.ghost:disabled,
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+}
+
+button.is-loading {
+  color: transparent;
+  background-image: linear-gradient(90deg, transparent 40%, rgba(255, 255, 255, 0.18) 50%, transparent 60%);
+  background-size: 200% 100%;
+  animation: loading-sheen 1.1s ease-in-out infinite;
+  position: relative;
+}
+
+button.is-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-color: transparent;
+  border-radius: inherit;
+  width: 18px;
+  height: 18px;
+  margin: auto;
+  animation: loading-spin 0.7s linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes loading-sheen {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.status-strip.is-error {
+  background: rgba(255, 107, 107, 0.07);
+  border-color: rgba(255, 107, 107, 0.25);
+  color: #ffb3b3;
+}
+
+.status-strip.is-success {
+  background: rgba(57, 255, 136, 0.06);
+  border-color: rgba(57, 255, 136, 0.2);
+  color: var(--text);
+}
+
+.connection-message {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.connection-message.is-error {
+  background: rgba(255, 107, 107, 0.07);
+  border: 1px solid rgba(255, 107, 107, 0.25);
+  color: #ffb3b3;
+}
+
+.connection-message.is-success {
+  background: rgba(57, 255, 136, 0.06);
+  border: 1px solid rgba(57, 255, 136, 0.2);
+  color: var(--text);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.form-status {
+  font-size: 13px;
+  color: var(--muted);
+}

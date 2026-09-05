@@ -7,13 +7,17 @@ const PORT = Number(process.env.PORT || 8080);
 const BACKEND_PORT = 4100;
 const FRONTEND_PORT = 5180;
 
+const PUBLIC_ORIGIN = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : `http://localhost:${PORT}`;
+
 const backend = spawn("node", ["server.js"], {
   cwd: path.join(__dirname, "backend"),
   env: {
     ...process.env,
     PORT: String(BACKEND_PORT),
-    FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || `http://localhost:${PORT}`,
-    ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || `http://localhost:${PORT}`,
+    FRONTEND_ORIGIN: PUBLIC_ORIGIN,
+    ALLOWED_ORIGINS: PUBLIC_ORIGIN,
   },
   stdio: "inherit",
 });

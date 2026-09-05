@@ -1,18 +1,66 @@
-echo ============================================
-echo  TrackROI - Liberando portas e iniciando
-echo ============================================
+<technical_audit_and_upgrade_brief project="TrackROI" target_agent="opencode">
 
-taskkill /F /FI "WINDOWTITLE eq TrackROI Backend" 2>nul
-taskkill /F /FI "WINDOWTITLE eq TrackROI Frontend" 2>nul
+  <context>
+    <current_stack>Node.js puro (sem framework), servidor HTTP nativo no backend, arquivo state.json como armazenamento único, frontend vanilla JS com renderização via innerHTML, deploy no Railway via start.js orquestrando dois processos filhos (backend + frontend) atrás de um proxy manual.</current_stack>
+    <confirmed_bug>Clicking "Conectar" for Meta Ads or Perfect Pay opens a new browser tab pointing directly at the backend OAuth-start endpoint. When META_APP_ID/META_APP_SECRET are missing, the backend returns raw JSON in that new tab instead of a handled error inside the app. This is a structural flaw in the connection flow, not just a missing env var.</confirmed_bug>
+    <business_requirement>TrackROI must feel and behave like a real, professional production SaaS — not a prototype. No fake/placeholder data, no broken flows, no silent failures visible to the end user.</business_requirement>
+  </context>
 
-echo Iniciando Backend (porta 4100)...
-start "TrackROI Backend" cmd /k "cd /d "%~dp0backend" && npm run dev"
+  <negative_prompt>
+    <avoid>Any mock data, fake numbers, or placeholder integration statuses used to "make the UI look complete"</avoid>
+    <avoid>Raw JSON or stack traces ever reaching the browser tab — every error must be caught and rendered as a proper UI state</avoid>
+    <avoid>Keeping the single-file state.json as the source of truth for a product expected to handle real production traffic</avoid>
+    <avoid>Hardcoding Meta/Perfect Pay-specific logic directly inside route handlers — this must become an extensible provider pattern</avoid>
+    <avoid>Full-page innerHTML re-renders and blind 30s polling of every endpoint regardless of which page is active</avoid>
+  </negative_prompt>
 
-echo Iniciando Frontend (porta 5180)...
-start "TrackROI Frontend" cmd /k "cd /d "%~dp0frontend" && npm run dev"
+  <priority_1 name="fix_broken_connection_flow">
+    <requirement>Replace the current target="_blank" anchor-based connect flow with a popup-window + postMessage pattern (or, if simpler given the current architecture, an in-app redirect flow using a dedicated /connections/callback route rendered by the frontend app itself, never the raw backend JSON).</requirement>
+    <requirement>Before starting any OAuth/connect flow, the backend must expose a lightweight status check (e.g. GET /api/integrations/meta/health) so the frontend can know in advance whether META_APP_ID/META_APP_SECRET are configured, and show a clear, human-readable message ("Integração ainda não configurada pelo administrador") instead of attempting a redirect that will fail.</requirement>
+    <requirement>Every failure path (missing credentials, expired code, Meta API error, Perfect Pay auth failure) must resolve to a rendered error state inside the Connections page — a toast, inline banner, or modal — never a bare JSON response shown directly to the user.</requirement>
+    <requirement>On successful connection via popup, use postMessage to notify the opener window, close the popup automatically, and refresh only the integrations data (not the full page).</requirement>
+  </priority_1>
 
-echo.
-echo Backend:  http://localhost:4100
-echo Frontend: http://localhost:5180
-echo.
-pause
+  <priority_2 name="scalability_and_performance_audit">
+    <data_layer>
+      <finding>state.json is read and rewritten in full on every single mutation, including high-frequency events like webhook receipts and click tracking. This does not scale past a small volume of test data.</finding>
+      <requirement>Migrate persistence to SQLite (via better-sqlite3 or the Node built-in node:sqlite) as the minimum viable production step — keeping it embedded/serverless-friendly for Railway, but replacing full-file read/write with real indexed tables: users, sessions, clicks, checkouts, sales, webhook_events, advertising_spend, audit_logs, products, integrations, settings.</requirement>
+      <requirement>Add indexes on frequently filtered/sorted columns: sales(gateway, gateway_transaction_id), sales(status), clicks(trackroi_click_id), webhook_events(idempotency_key) — idempotency_key must remain a unique constraint at the DB level, not just an in-memory .some() check.</requirement>
+      <requirement>Move dashboard aggregation (funnel, ROAS, ROI, CPA) into SQL aggregate queries (COUNT, SUM, GROUP BY) instead of loading full arrays into memory and reducing in JS.</requirement>
+    </data_layer>
+    <realtime_layer>
+      <finding>Frontend polls 7 endpoints every 30 seconds regardless of which page is open, and the login/session flow already establishes an authenticated connection that could carry live updates.</finding>
+      <requirement>Replace blanket polling with a WebSocket or Server-Sent-Events channel that pushes dashboard/funnel updates only when underlying data actually changes (e.g. right after a webhook event is processed), and fetch only the data needed for the currently active route on navigation.</requirement>
+    </realtime_layer>
+    <rendering_layer>
+      <finding>Every render() call replaces the entire #page-root innerHTML, discarding and rebuilding all DOM nodes even for a single metric update.</finding>
+      <requirement>Introduce a lightweight, no-build-step approach to partial DOM updates (e.g. a minimal diffing helper, or per-widget update functions that only touch the DOM nodes whose underlying value changed) so metric cards and the funnel chart animate/update in place rather than flashing on every refresh.</requirement>
+    </rendering_layer>
+  </priority_2>
+
+  <priority_3 name="plug_and_play_integration_architecture">
+    <requirement>Refactor Meta Ads and Perfect Pay from hardcoded route handlers into a common "provider" interface/module, e.g. each provider exports: { id, displayName, getAuthUrl(state), handleOAuthCallback(code, state), verifyWebhookSignature(payload, headers), normalizeWebhookEvent(payload) }.</requirement>
+    <requirement>Store connected integrations in a generic integrations table (provider_id, status, credentials_encrypted, connected_account, last_sync_at, metadata JSON) rather than fixed meta/perfectPay fields on a single object — this is what makes adding Google Ads, TikTok Ads, or another payment gateway later a matter of registering a new provider module, not rewriting the backend.</requirement>
+    <requirement>Add a provider registry so the /api/integrations endpoint and the Connections page render dynamically from whatever providers are registered, instead of the UI hardcoding two connection cards.</requirement>
+  </priority_3>
+
+  <priority_4 name="security_hardening">
+    <requirement>Make ENCRYPTION_KEY mandatory in production (fail fast on startup with a clear error if missing) rather than silently falling back to storing access tokens in plaintext — this is non-negotiable for a product that stores real ad-platform and payment-gateway credentials.</requirement>
+    <requirement>Move the in-memory CSRF token map and login rate-limiter (loginAttempts Map) to the persistent data layer or at minimum a proper cache (e.g. Redis if available on Railway, or a DB-backed table) so they survive process restarts and work correctly if the backend ever scales to more than one instance.</requirement>
+    <requirement>Add structured server-side logging (request id, user id, route, latency, status code) instead of ad-hoc console.log/console.error calls, so production issues are diagnosable.</requirement>
+  </priority_4>
+
+  <priority_5 name="ux_upgrade_300_percent">
+    <requirement>Connections page: replace the static "Faltam N conexões" text with a live, animated progress state that updates the moment a provider actually connects (via the realtime channel from priority_2), plus a visible last-sync timestamp and a "test connection" action per provider.</requirement>
+    <requirement>Every async action in the UI (connect, save settings, add product) must show an inline loading state on the specific button/element being acted on — not just a global status strip at the top of the page.</requirement>
+    <requirement>Replace generic error strings ("Não foi possível atualizar os dados: ...") with actionable, specific messages tied to what actually failed (e.g. "A Meta não respondeu — tente reconectar" vs "Sua sessão expirou").</requirement>
+    <requirement>Add empty/loading/error states as first-class, designed components for every page (dashboard, sales, funnel, products, logs) — not just the dashboard's current onboarding block.</requirement>
+  </priority_5>
+
+  <deliverable_format>
+    <scope>Backend: persistence migration to SQLite, provider abstraction for integrations, security hardening, structured logging. Frontend: fixed connection flow (popup + postMessage or in-app callback route), realtime updates via WebSocket/SSE, partial DOM updates, upgraded empty/loading/error states across all pages.</scope>
+    <constraint>No mock or placeholder data anywhere in the final code. Every number, status, and connection state must reflect real backend state — if data is genuinely absent, show an honest empty state, never a fabricated value.</constraint>
+    <constraint>Preserve existing route paths and response shapes wherever possible to avoid breaking anything already deployed on Railway, unless a breaking change is required by the SQLite migration — in that case, include a one-time migration script that reads the existing state.json and imports it into the new database schema.</constraint>
+  </deliverable_format>
+
+</technical_audit_and_upgrade_brief>

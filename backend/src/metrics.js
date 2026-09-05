@@ -21,46 +21,35 @@ function ratio(numerator, denominator) {
   return numerator / denominator;
 }
 
-function matchSource(item, source) {
-  if (!source || source === "all") return true;
-  return String(item.source || "").toLowerCase() === source.toLowerCase();
-}
+function buildDashboardFromAggregates({ aggregates, source = "all" }) {
+  const {
+    approvedCount = 0,
+    approvedRevenueCents = 0,
+    refundCents = 0,
+    totalSales = 0,
+    pendingSales = 0,
+    clickCount = 0,
+    checkoutCount = 0,
+    spendCents = 0,
+  } = aggregates || {};
 
-function buildDashboard(state, query = {}) {
-  const source = query.source || "all";
-  const clicks = state.clicks.filter((item) => matchSource(item, source));
-  const checkouts = state.checkouts.filter((item) => matchSource(item, source));
-  const sales = state.sales.filter((item) => {
-    if (source === "all") return true;
-    if (source === "direct") return !item.source || item.source === "direct";
-    return String(item.source || "").toLowerCase() === source.toLowerCase();
-  });
-  const spendCents = state.advertisingSpend
-    .filter((row) => matchSource(row, source))
-    .reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
-  const revenueCents = sales.filter((sale) => sale.status === "approved").reduce((sum, sale) => sum + Number(sale.amountCents || 0), 0);
-  const refundCents = sales.filter((sale) => sale.status === "refunded" || sale.status === "chargeback").reduce((sum, sale) => sum + Number(sale.amountCents || 0), 0);
-  const netRevenueCents = revenueCents - refundCents;
+  const netRevenueCents = approvedRevenueCents - refundCents;
   const profitCents = netRevenueCents - spendCents;
-  const approvedSales = sales.filter((sale) => sale.status === "approved").length;
-  const pendingSales = sales.filter((sale) => sale.status === "pending").length;
-  const totalSales = sales.length;
-  const clickCount = clicks.length;
-  const checkoutCount = checkouts.length;
   const roas = ratio(netRevenueCents, spendCents);
   const roi = ratio(profitCents, spendCents);
-  const cpa = ratio(spendCents / 100, approvedSales);
-  const cvr = ratio(approvedSales, clickCount);
-  const aov = ratio(revenueCents / 100, approvedSales);
+  const cpa = ratio(spendCents / 100, approvedCount);
+  const cvr = ratio(approvedCount, clickCount);
+  const aov = ratio(approvedRevenueCents / 100, approvedCount);
+
   const funnel = [
     { key: "clicks", label: "Cliques", count: clickCount },
     { key: "pageview", label: "Visitas na Página", count: clickCount },
     { key: "checkout", label: "Iniciar Checkout", count: checkoutCount },
     { key: "sales", label: "Vendas Geradas", count: totalSales },
-    { key: "approved", label: "Vendas Aprovadas", count: approvedSales },
+    { key: "approved", label: "Vendas Aprovadas", count: approvedCount },
   ];
 
-  const hasData = clickCount > 0 || checkoutCount > 0 || approvedSales > 0 || spendCents > 0;
+  const hasData = clickCount > 0 || checkoutCount > 0 || approvedCount > 0 || spendCents > 0;
 
   return {
     ok: true,
@@ -68,7 +57,7 @@ function buildDashboard(state, query = {}) {
     filters: { source },
     summary: {
       spendCents,
-      revenueCents,
+      revenueCents: approvedRevenueCents,
       netRevenueCents,
       profitCents,
       refundCents,
@@ -77,7 +66,7 @@ function buildDashboard(state, query = {}) {
       cpa,
       cvr,
       aov,
-      approvedSales,
+      approvedSales: approvedCount,
       pendingSales,
       totalSales,
       clickCount,
@@ -85,7 +74,7 @@ function buildDashboard(state, query = {}) {
     },
     cards: [
       { key: "spend", label: "Investimento", value: normalizeMoney(spendCents), tone: "neutral" },
-      { key: "revenue", label: "Receita", value: normalizeMoney(revenueCents), tone: "neutral" },
+      { key: "revenue", label: "Receita", value: normalizeMoney(approvedRevenueCents), tone: "neutral" },
       { key: "profit", label: "Lucro", value: normalizeMoney(profitCents), tone: profitCents >= 0 ? "positive" : "negative" },
       { key: "roas", label: "ROAS", value: roas == null ? "—" : formatNumber(roas, 2), tone: roas != null && roas >= 1 ? "positive" : roas != null ? "negative" : "neutral" },
       { key: "roi", label: "ROI", value: roi == null ? "—" : `${formatNumber(roi * 100, 1)}%`, tone: roi != null && roi >= 0 ? "positive" : roi != null ? "negative" : "neutral" },
@@ -104,18 +93,11 @@ function buildDashboard(state, query = {}) {
         };
       }),
     },
-    sales: sales.slice().reverse(),
-    clicks: clicks.slice().reverse(),
-    checkouts: checkouts.slice().reverse(),
-    integrations: state.integrations,
-    settings: state.settings,
-    auditLogs: state.auditLogs.slice().reverse(),
-    products: state.products,
   };
 }
 
 module.exports = {
-  buildDashboard,
+  buildDashboardFromAggregates,
   normalizeMoney,
   formatNumber,
   ratio,

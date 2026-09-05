@@ -1,0 +1,103 @@
+<ui_redesign_brief project="TrackROI" version="1.0">
+
+  <context>
+    <product>TrackROI — private marketing attribution SaaS (Meta Ads + Perfect Pay), currently in Base44/opencode build.</product>
+    <current_state>Legacy dashboard with generic dark sidebar, flat metric cards, static "—" placeholders, no motion, no visual identity. Looks like a default AI-generated admin template.</current_state>
+    <goal>Redesign the interface into a premium, custom-feeling analytics product. Every screen must look hand-crafted by a senior product designer, not scaffolded by an AI tool.</goal>
+  </context>
+
+  <negative_prompt>
+    <avoid>Generic SaaS admin template aesthetic (Tailwind UI / shadcn default look with no customization)</avoid>
+    <avoid>Visible "vibe-coded" patterns: default border-radius everywhere, default shadow-md, default indigo-500/blue-600 accents, default Inter font with no hierarchy</avoid>
+    <avoid>Boxy, evenly-spaced grid of identical rounded cards with no depth or focal point</avoid>
+    <avoid>Flat single-color icons with no custom stroke weight or illustration style</avoid>
+    <avoid>Placeholder-looking empty states (plain centered text in a box)</avoid>
+    <avoid>Any visible AI-tool fingerprints: default component libraries used without restyling, default spacing scale, default font-weight jumps (400→700 with nothing between)</avoid>
+  </negative_prompt>
+
+  <design_direction>
+    <identity>Dark, data-dense, "trading terminal meets premium analytics" feel — closer to Linear, Vercel Dashboard, or a high-end trading platform than a generic SaaS template.</identity>
+    <color_system>
+      <base>Near-black background (not pure #000, use a very dark charcoal e.g. #0A0A0C) with subtle layered surfaces (elevation via slightly lighter dark tones, not shadows)</base>
+      <accent_profit>Green reserved exclusively for profit/positive values</accent_profit>
+      <accent_loss>Red reserved exclusively for negative balance/loss</accent_loss>
+      <neutral_numbers>White/off-white for standard numeric data</neutral_numbers>
+      <chart_accent>Incandescent green-to-purple gradient reserved for the conversion funnel only — do not reuse this gradient elsewhere, so it stays visually distinct and meaningful</chart_accent>
+    </color_system>
+    <typography>Establish a clear type scale with at least 5 distinct weights/sizes for hierarchy (hero numbers, section labels, body, captions, micro-labels). Use a distinctive display font for large KPI numbers (e.g. tabular-nums monospace or a geometric sans) — not the default system sans at every level.</typography>
+    <depth_and_texture>Use subtle noise/grain or gradient meshes on background surfaces, soft inner glows on active elements, and 1px hairline borders with low-opacity white (not drop shadows) to create depth typical of premium dark-mode products.</depth_and_texture>
+    <microinteractions>Every interactive element (card hover, button press, tab switch, filter dropdown) must have a deliberate transition — no instant state changes. Use spring-based easing, not linear/ease-in-out defaults.</microinteractions>
+  </design_direction>
+
+  <component name="sidebar_navigation">
+    <default_state>Expanded: logo + product name at top, icon + label for each nav item (Dashboard, Vendas, Funil, Métricas, Produtos, Ferramentas, Conexões, Configurações), "Conexões e Rastreamento" info card at bottom, Sair at the very bottom.</default_state>
+    <interaction>
+      <trigger>Click on the logo/brand mark at the top of the sidebar</trigger>
+      <collapse_behavior>
+        <width>Animate sidebar width from full (~240px) down to icon-only (~72px)</width>
+        <content_transition>Labels, product name, and the "Conexões e Rastreamento" card fade out and slide left slightly (translateX -8px, opacity 1→0) BEFORE or simultaneously with the width collapse — do not let text wrap/clip awkwardly mid-animation</content_transition>
+        <icon_state>Icons re-center horizontally within the collapsed rail once width animation completes</icon_state>
+        <tooltip>On hover over a collapsed icon, show a small tooltip with the item label after a short delay (~300ms)</tooltip>
+      </collapse_behavior>
+      <expand_behavior>Reverse animation on second click: width animates back to full, then labels fade in + slide in from left, staggered slightly (~30-50ms delay per item) for a fluid cascading feel rather than all text appearing at once</expand_behavior>
+    </interaction>
+    <animation_spec>
+      <duration>280-350ms for width transition</duration>
+      <easing>cubic-bezier(0.4, 0.0, 0.2, 1) or spring(damping: 20, stiffness: 200)</easing>
+      <label_stagger>30ms per nav item</label_stagger>
+      <persist_state>Remember collapsed/expanded state (local state or localStorage) across navigation within the session</persist_state>
+    </animation_spec>
+    <active_item_indicator>Use an animated pill/bar that slides between nav items on selection (not just a static background color swap) — a layoutId-style shared element transition.</active_item_indicator>
+  </component>
+
+  <component name="conversion_funnel_chart" name_display="Ultra-Violet Funnel">
+    <negative_prompt_chart>
+      <avoid>Spreadsheet-style bar/table representation</avoid>
+      <avoid>Generic stacked "tower" funnel bars (wide-to-narrow trapezoids stacked vertically)</avoid>
+      <avoid>Line chart shaped like a stock-market up/down price movement</avoid>
+    </negative_prompt_chart>
+    <container>
+      <shape>One large rectangular panel, full-width within its dashboard section, generous internal padding, dark elevated surface distinct from the page background</shape>
+      <title_area>Chart title + live-updating subtitle showing the current totals per stage</title_area>
+    </container>
+    <chart_type>Custom area/stream chart — NOT a standard line chart with stroke only. Each funnel stage is a horizontal band/layer, ordered top-to-bottom as sequential steps of the funnel, connected by smooth curved (not angular) transitions between stage widths.</chart_type>
+    <stages order="sequential">
+      <stage id="1" label="Cliques"/>
+      <stage id="2" label="Visitas na Página"/>
+      <stage id="3" label="Iniciar Checkout"/>
+      <stage id="4" label="Vendas Geradas"/>
+      <stage id="5" label="Vendas Aprovadas"/>
+    </stages>
+    <geometry>
+      <fill_type>Solid gradient fill under/around the curve — NOT a stroked outline only. Each stage's band width (vertical thickness or horizontal span, matching the illustrative funnel shape) is proportional to its value relative to the top stage.</fill_type>
+      <symmetry>Mirrored/symmetrical around a horizontal center axis — the shape is reflected top-to-bottom (like a spindle/river/funnel silhouette), not a single-sided area chart.</symmetry>
+      <curve_interpolation>Use smooth spline/monotone curve interpolation between stage points so transitions look organic and fluid, not jagged.</curve_interpolation>
+    </geometry>
+    <gradient_spec>
+      <direction>Left to right (start of funnel → end of funnel)</direction>
+      <color_start>Incandescent green (e.g. #39FF88 / #00FFA3 at high luminosity)</color_start>
+      <color_end>Deep electric purple/violet (e.g. #8A2BE2 / #A020F0)</color_end>
+      <glow_effect>Apply a soft outer glow (blur + low-opacity duplicate of the fill color) around the shape's edge to reinforce the "incandescent"/neon feel, especially strong at the green end and fading into the violet end</glow_effect>
+      <background_interaction>Optionally let the glow subtly bleed onto the dark container background behind the shape for extra depth</background_interaction>
+    </gradient_spec>
+    <data_labels>
+      <per_stage>Show stage name, absolute value, and % conversion relative to previous stage — positioned near each stage's widest point, either inline or as a floating label with a connecting line</per_stage>
+      <animation_on_value_change>When new data arrives, animate the shape morphing (width/height interpolation) between old and new values over ~500-700ms, not an instant snap</animation_on_value_change>
+    </data_labels>
+    <live_update>
+      <behavior>Component re-renders reactively whenever underlying metrics (cliques, visitas, iniciar checkout, vendas geradas, vendas aprovadas) update via the data source — no manual refresh required</behavior>
+      <loading_state>While waiting for real data, show a skeleton shimmer version of the shape (still using the green-purple palette, low opacity) rather than a blank box or fake numbers</loading_state>
+      <empty_state>If zero data, render the container with a subtle flat-lined ultra-violet shape at minimum height plus a short honest message, not the current plain gray placeholder box</empty_state>
+    </live_update>
+    <tech_notes>
+      <library_suggestion>Implement as custom SVG (path with d3-shape's area/line generators using curveMonotoneX or curveBasis) rather than a default chart library preset — this is required to achieve the mirrored incandescent fill and glow, which standard chart-library themes cannot produce out of the box</library_suggestion>
+      <gradient_defs>Use SVG linearGradient in <defs> for the fill, and an SVG filter (feGaussianBlur) for the glow layer</gradient_defs>
+    </tech_notes>
+  </component>
+
+  <deliverable_format>
+    <output>Production-ready React components (TypeScript), Tailwind for layout/spacing only (no default color tokens — extend the theme with the custom dark palette above), Framer Motion for all transitions (sidebar collapse, active-item indicator, funnel morph animation), custom SVG for the funnel chart.</output>
+    <scope>Redesign: sidebar navigation component, dashboard metric cards, and conversion funnel chart component. Preserve existing data structure/props contract — this is a visual/interaction redesign, not a data-layer change.</scope>
+  </deliverable_format>
+
+</ui_redesign_brief>

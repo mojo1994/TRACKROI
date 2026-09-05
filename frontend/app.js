@@ -1,13 +1,15 @@
 const API_BASE = window.__API_BASE__ || "";
 const TOKEN_KEY = "trackroi_token";
+const CSRF_KEY = "trackroi_csrf";
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
-  csrfToken: localStorage.getItem("trackroi_csrf") || "",
+  csrfToken: localStorage.getItem(CSRF_KEY) || "",
   user: null,
   route: normalizeRoute(location.hash.slice(1) || "dashboard"),
   source: "all",
-  data: null,
+  routeData: null,
+  dataCache: {},
   loading: false,
   sidebarExpanded: localStorage.getItem("trackroi_sidebar_expanded") !== "0",
 };
@@ -68,6 +70,13 @@ function formatDateTime(value) {
   }).format(date);
 }
 
+function friendlyError(error) {
+  const message = error?.message || "";
+  if (message === "AUTH_REQUIRED") return "Sessão expirada. Faça login novamente.";
+  if (message.includes("Failed to fetch")) return "Não foi possível conectar ao servidor. Tente novamente.";
+  return message || "Algo deu errado. Tente novamente.";
+}
+
 async function apiFetch(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -79,10 +88,7 @@ async function apiFetch(path, options = {}) {
   }
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers,
-    });
+    response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   } catch (networkError) {
     throw new Error("Não foi possível conectar. Verifique sua internet e tente novamente.");
   }
@@ -90,7 +96,7 @@ async function apiFetch(path, options = {}) {
     state.token = "";
     state.csrfToken = "";
     localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem("trackroi_csrf");
+    localStorage.removeItem(CSRF_KEY);
     throw new Error("AUTH_REQUIRED");
   }
   const text = await response.text();
@@ -108,11 +114,13 @@ async function apiFetch(path, options = {}) {
   return body;
 }
 
-function setStatus(message) {
+function setStatus(message, tone = "") {
   const node = el("status-strip");
   if (node) {
     node.hidden = !message;
     node.textContent = message || "";
+    node.classList.toggle("is-error", tone === "error");
+    node.classList.toggle("is-success", tone === "success");
   }
 }
 
@@ -120,6 +128,20 @@ function setLoginError(message) {
   const node = el("login-error");
   node.hidden = !message;
   node.textContent = message || "";
+}
+
+function setButtonLoading(button, label) {
+  if (!button) return;
+  if (label) {
+    if (!button.dataset.originalLabel) button.dataset.originalLabel = button.textContent;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.textContent = label;
+  } else {
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    if (button.dataset.originalLabel) button.textContent = button.dataset.originalLabel;
+  }
 }
 
 function showLogin() {
@@ -198,6 +220,215 @@ function mountSidebarIcons() {
   window.addEventListener("resize", moveNavIndicator);
 }
 
+/* ------------------------------------------------------------- Data loading */
+
+const routeFetch = {
+  dashboard: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
+  funnel: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
+  metrics: () => apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
+  sales: async () => {
+    const sales = await apiFetch("/api/sales");
+    return { ok: true, sales: sales.items || [], pagination: sales.pagination };
+  },
+  products: async () => {
+    const products = await apiFetch("/api/products");
+    return { ok: true, products: products.items || [] };
+  },
+  connections: async () => {
+    const integrations = await apiFetch("/api/integrations");
+    return { ok: true, integrations: integrations.items || [] };
+  },
+  settings: async () => {
+    const settings = await apiFetch("/api/settings");
+    return { ok: true, settings: settings.settings || {} };
+  },
+  logs: async () => {
+    const [webhookEvents, auditLogs] = await Promise.all([
+      apiFetch("/api/webhook-events"),
+      apiFetch("/api/audit-logs"),
+    ]);
+    return { ok: true, webhookEvents: webhookEvents.items || [], auditLogs: auditLogs.items || [] };
+  },
+};
+
+async function loadData(route = state.route, { silent = false } = {}) {
+  state.route = normalizeRoute(route);
+  state.loading = true;
+  if (!silent) setStatus("");
+  if (!state.dataCache[state.route]) renderPage();
+  try {
+    const data = await routeFetch[state.route]();
+    data._source = state.source;
+    state.routeData = data;
+    state.dataCache[state.route] = data;
+    state.loading = false;
+    if (silent && state.route === "dashboard") {
+      applyDashboardData(data);
+    } else {
+      renderPage();
+    }
+  } catch (error) {
+    state.loading = false;
+    if (error.message === "AUTH_REQUIRED") {
+      stopSSE();
+      showLogin();
+      return;
+    }
+    if (silent) {
+      setStatus(`Não foi possível atualizar: ${friendlyError(error)}`, "error");
+    } else {
+      renderErrorPage(friendlyError(error));
+    }
+  }
+}
+
+function renderErrorPage(message) {
+  pageTitle(state.route);
+  pageControls(state.route);
+  const root = el("page-root");
+  root.innerHTML = `
+    <section class="onboarding">
+      <div class="onboarding-orb"></div>
+      <h3>Não foi possível carregar</h3>
+      <p>${escapeHtml(message)}</p>
+      <div class="onboarding-actions">
+        <button id="reload-button" type="button" class="btn-primary">Tentar novamente</button>
+      </div>
+    </section>
+  `;
+  attachPageHandlers();
+}
+
+/* ------------------------------------------------------------- SSE */
+
+let sseSource = null;
+
+function startSSE() {
+  stopSSE();
+  if (!state.token) return;
+  const source = new EventSource(`${API_BASE || ""}/api/events?token=${encodeURIComponent(state.token)}`);
+  sseSource = source;
+  source.onmessage = (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (message && message.type === "data") handleRealtime(message);
+  };
+  source.onerror = () => {
+    /* EventSource reconecta automaticamente */
+  };
+}
+
+function stopSSE() {
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null;
+  }
+}
+
+function handleRealtime(message) {
+  if (!state.user) return;
+  const changed = message.changed || [];
+  const relevant = changed.includes(state.route) || (state.route === "dashboard" && changed.some((c) => ["dashboard", "funnel", "metrics", "sales"].includes(c)));
+  if (relevant) {
+    loadData(state.route, { silent: true });
+  }
+}
+
+/* ------------------------------------------------------------- Popup connection flow (P1) */
+
+function openConnectPopup(providerId) {
+  return new Promise((resolve) => {
+    const url = `${API_BASE}/api/integrations/connect/${providerId}?token=${encodeURIComponent(state.token || "")}`;
+    const popup = window.open(url, "trackroi_connect", "width=520,height=680");
+    if (!popup) {
+      resolve({ ok: false, error: "O navegador bloqueou a janela. Permita pop-ups para esta página." });
+      return;
+    }
+    const onMessage = (event) => {
+      const payload = event.data;
+      if (!payload || payload.type !== "trackroi:oauth") return;
+      if (payload.provider !== providerId) return;
+      window.removeEventListener("message", onMessage);
+      clearTimeout(timer);
+      try {
+        popup.close();
+      } catch {
+        /* popup já fechado */
+      }
+      resolve({ ok: payload.ok === true, error: payload.error || null, connectedAccount: payload.connectedAccount || null });
+    };
+    window.addEventListener("message", onMessage);
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMessage);
+      try {
+        popup.close();
+      } catch {
+        /* já fechado */
+      }
+      resolve({ ok: false, error: "A janela foi fechada antes da conexão terminar." });
+    }, 120000);
+  });
+}
+
+async function connectProvider(providerId, button) {
+  setButtonLoading(button, "Verificando…");
+  try {
+    const health = await apiFetch(`/api/integrations/${providerId}/health`);
+    if (!health.configured) {
+      setButtonLoading(button, "");
+      showConnectMessage(providerId, health.message || "Integração ainda não configurada pelo administrador.", "error");
+      return;
+    }
+    setButtonLoading(button, "Aguardando autorização…");
+    const result = await openConnectPopup(providerId);
+    setButtonLoading(button, "");
+    if (result.ok) {
+      showConnectMessage(providerId, result.connectedAccount ? `Conectado como ${result.connectedAccount}.` : "Conexão concluída.", "success");
+      await loadData("connections", { silent: true });
+    } else {
+      showConnectMessage(providerId, result.error || "Não foi possível conectar.", "error");
+      await loadData("connections", { silent: true });
+    }
+  } catch (error) {
+    setButtonLoading(button, "");
+    showConnectMessage(providerId, friendlyError(error), "error");
+  }
+}
+
+async function testProvider(providerId, button) {
+  setButtonLoading(button, "Testando…");
+  try {
+    const health = await apiFetch(`/api/integrations/${providerId}/health`);
+    setButtonLoading(button, "");
+    if (health.configured) {
+      showConnectMessage(providerId, "Conexão OK. Pronto para conectar.", "success");
+    } else {
+      showConnectMessage(providerId, health.message || "Configuração ausente.", "error");
+    }
+  } catch (error) {
+    setButtonLoading(button, "");
+    showConnectMessage(providerId, friendlyError(error), "error");
+  }
+}
+
+function showConnectMessage(providerId, message, tone) {
+  const node = document.querySelector(`[data-connect-message="${providerId}"]`);
+  if (node) {
+    node.hidden = false;
+    node.textContent = message;
+    node.classList.remove("is-error", "is-success");
+    node.classList.add(tone === "error" ? "is-error" : "is-success");
+  } else {
+    setStatus(message, tone);
+  }
+}
+
+/* ------------------------------------------------------------- Rendering */
+
 function renderMetricCards(cards) {
   return `
     <section class="cards-grid">
@@ -206,7 +437,7 @@ function renderMetricCards(cards) {
           const toneClass = card.tone === "positive" ? "positive" : card.tone === "negative" ? "negative" : "";
           const hint = card.hint ? `<div class="metric-hint">${escapeHtml(card.hint)}</div>` : "";
           return `
-            <article class="metric-card">
+            <article class="metric-card" data-card="${escapeHtml(card.key)}">
               <div class="metric-label">${escapeHtml(card.label)}</div>
               <div class="metric-value ${toneClass}">${escapeHtml(card.value)}</div>
               ${hint}
@@ -216,6 +447,45 @@ function renderMetricCards(cards) {
         .join("")}
     </section>
   `;
+}
+
+function applyDashboardData(data) {
+  const root = el("page-root");
+  if (!root || state.route !== "dashboard") return;
+  const cards = data.cards || [];
+  const cardNodes = root.querySelectorAll(".metric-card");
+  if (cardNodes.length === cards.length && cards.length) {
+    cardNodes.forEach((node, index) => {
+      const card = cards[index];
+      const valueNode = node.querySelector(".metric-value");
+      if (valueNode && valueNode.textContent !== card.value) {
+        valueNode.textContent = card.value;
+        valueNode.classList.toggle("positive", card.tone === "positive");
+        valueNode.classList.toggle("negative", card.tone === "negative");
+      }
+    });
+    if (data.funnel) {
+      const funnelPanel = root.querySelector("section.panel");
+      if (funnelPanel) {
+        const subtitle = funnelPanel.querySelector(".panel-subtitle");
+        const body = funnelPanel.querySelector(":scope > :not(.panel-header)");
+        if (body) {
+          const nf = new Intl.NumberFormat("pt-BR");
+          const funnelSub = data.funnel.stages?.length
+            ? data.funnel.stages.map((stage) => `${nf.format(stage.count)} ${stage.label.toLowerCase()}`).join(" · ")
+            : "Cliques, visitas, checkouts e vendas.";
+          if (subtitle) subtitle.textContent = funnelSub;
+          const holder = document.createElement("div");
+          holder.innerHTML = uvFunnelHtml(data.funnel);
+          body.replaceWith(holder.firstElementChild);
+          animateFunnel(data.funnel.stages);
+        }
+      }
+    }
+    setStatus("");
+  } else {
+    renderPage();
+  }
 }
 
 function curveThrough(points) {
@@ -367,7 +637,7 @@ function animateFunnel(stages) {
 function statusPill(status) {
   const map = {
     connected: ["Conectado", "ok"],
-    not_connected: ["Desconectado", "off"],
+    not_connected: ["Não conectado", "off"],
     needs_reconnect: ["Precisa atenção", "warn"],
     configured: ["Configurado", "ok"],
     not_configured: ["Não configurado", "off"],
@@ -431,10 +701,6 @@ function pageControls(route) {
     logs: refresh,
   };
   controls.innerHTML = routeControls[route] || refresh;
-}
-
-function integrationConnectUrl(provider) {
-  return `${API_BASE}/api/integrations/connect/${provider}?token=${encodeURIComponent(state.token || "")}`;
 }
 
 function pageTitle(route) {
@@ -555,37 +821,85 @@ function productsPage(data) {
   `;
 }
 
-function connectionCard({ provider, name, description, status, detail, connectUrl }) {
-  const connected = status === "connected" || status === "configured";
+function connectionCard(item) {
+  const connected = item.connected === true;
+  const status = connected || item.status === "connected" ? "connected" : item.status || "not_connected";
+  const notConfigured = item.configured === false;
   return `
-    <article class="connection-card ${connected ? "is-connected" : ""}">
+    <article class="connection-card ${connected ? "is-connected" : ""}" data-provider-card="${escapeHtml(item.id)}">
       <div class="connection-card-head">
-        <div class="connection-logo">${name.charAt(0)}</div>
+        <div class="connection-logo">${escapeHtml((item.displayName || item.id).charAt(0))}</div>
         <div class="connection-card-title">
-          <div class="connection-name">${escapeHtml(name)}</div>
-          <div class="connection-desc">${escapeHtml(description)}</div>
+          <div class="connection-name">${escapeHtml(item.displayName || item.id)}</div>
+          <div class="connection-desc">${escapeHtml(item.description || "")}</div>
         </div>
         ${statusPill(status)}
       </div>
       <div class="connection-card-body">
-        <div class="connection-line">${escapeHtml(detail || (connected ? "Tudo pronto." : "Sua ferramenta ainda não está conectada."))}</div>
+        <div class="connection-line">
+          ${connected
+            ? `Conectado${item.connectedAccount ? ` — ${escapeHtml(item.connectedAccount)}` : ""}.`
+            : notConfigured
+              ? "Integração ainda não configurada pelo administrador."
+              : escapeHtml(item.healthMessage || "Sua ferramenta ainda não está conectada.")}
+        </div>
+        ${item.lastSyncAt ? `<div class="connection-line muted">Última sincronização: ${escapeHtml(formatDateTime(item.lastSyncAt))}</div>` : ""}
+        <div class="connection-message" data-connect-message="${escapeHtml(item.id)}" hidden></div>
         <div class="connection-actions">
-          <a class="btn-primary" href="${connectUrl}" target="_blank" rel="noreferrer">
-            ${connected ? "Gerenciar" : "Conectar"}
-          </a>
+          ${notConfigured
+            ? `<span class="ghost" disabled>Configuração pendente</span>`
+            : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : "Conectar"}</button>`}
+          <button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar conexão</button>
         </div>
       </div>
     </article>
   `;
 }
 
-function connectionsPage(data) {
-  const integrations = data.integrations || {};
-  const meta = integrations.meta || {};
-  const perfectPay = integrations.perfectPay || {};
+function connectionAdvanced(integrations) {
+  const byId = (id) => (integrations || []).find((item) => item.id === id) || {};
+  const meta = byId("meta");
+  const perfectPay = byId("perfectpay");
+  return `
+    <details class="advanced-section">
+      <summary><span class="advanced-title">Configurações avançadas</span><span class="advanced-caret"></span></summary>
+      <div class="advanced-body">
+        <form id="meta-connection-form" class="stack-form compact-form">
+          <div class="form-title">Meta Ads</div>
+          <label><span>Status</span>
+            <select id="meta-status">
+              <option value="not_connected" ${meta.status !== "connected" ? "selected" : ""}>Não conectado</option>
+              <option value="connected" ${meta.status === "connected" ? "selected" : ""}>Conectado</option>
+              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
+            </select>
+          </label>
+          <label><span>ID da conta de anúncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
+          <button type="submit" id="meta-save-button">Salvar Meta</button>
+        </form>
 
-  const metaConnected = meta.status === "connected";
-  const ppConnected = perfectPay.status === "connected" || perfectPay.apiStatus === "connected";
+        <form id="perfectpay-connection-form" class="stack-form compact-form">
+          <div class="form-title">Perfect Pay</div>
+          <label><span>Status</span>
+            <select id="perfectpay-status">
+              <option value="not_connected" ${perfectPay.status !== "connected" ? "selected" : ""}>Não conectado</option>
+              <option value="connected" ${perfectPay.status === "connected" ? "selected" : ""}>Conectado</option>
+              <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
+            </select>
+          </label>
+          <label><span>URL de eventos</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
+          <label><span>Segredo compartilhado</span><input id="perfectpay-webhook-secret" type="password" value="" placeholder="Novo segredo (opcional)" /></label>
+          <button type="submit" id="perfectpay-save-button">Salvar Perfect Pay</button>
+        </form>
+      </div>
+    </details>
+  `;
+}
+
+function connectionsPage(data) {
+  const integrations = data.integrations || [];
+  const connectedCount = integrations.filter((item) => item.connected === true).length;
+  const total = integrations.length;
+  const allDone = connectedCount === total && total > 0;
 
   const hero = `
     <section class="connections-hero">
@@ -595,68 +909,26 @@ function connectionsPage(data) {
       </div>
       <div class="connections-progress">
         <div class="progress-steps">
-          <span class="progress-step ${metaConnected ? "done" : ""}">${metaConnected ? "✓" : "1"}</span>
-          <span class="progress-line ${metaConnected ? "done" : ""}"></span>
-          <span class="progress-step ${ppConnected ? "done" : ""}">${ppConnected ? "✓" : "2"}</span>
+          ${integrations
+            .map((item, index) => {
+              const done = item.connected === true;
+              return `
+                ${index > 0 ? `<span class="progress-line ${integrations[index - 1].connected === true ? "done" : ""}"></span>` : ""}
+                <span class="progress-step ${done ? "done" : ""}">${done ? "✓" : index + 1}</span>
+              `;
+            })
+            .join("")}
         </div>
-        <div class="progress-label">${metaConnected && ppConnected ? "Tudo pronto!" : "Faltam " + ((metaConnected ? 0 : 1) + (ppConnected ? 0 : 1)) + " conexões"}</div>
+        <div class="progress-label">${allDone ? "Tudo pronto!" : `Faltam ${total - connectedCount} conexões`}</div>
       </div>
     </section>
   `;
 
   const cards = `
     <section class="connections-layout">
-      ${connectionCard({
-        provider: "meta",
-        name: "Meta Ads",
-        description: "Importe gastos, campanhas e resultados dos seus anúncios.",
-        status: meta.status,
-        detail: metaConnected ? `Conectado${meta.connectedAccount ? ` — ${meta.connectedAccount}` : ""}` : "Ainda não conectado.",
-        connectUrl: integrationConnectUrl("meta"),
-      })}
-      ${connectionCard({
-        provider: "perfectpay",
-        name: "Perfect Pay",
-        description: "Receba suas vendas aprovadas automaticamente.",
-        status: perfectPay.apiStatus,
-        detail: ppConnected ? "Conectado e recebendo eventos." : "Ainda não conectado.",
-        connectUrl: integrationConnectUrl("perfectpay"),
-      })}
+      ${integrations.map((item) => connectionCard(item)).join("")}
+      ${integrations.length === 0 ? `<div class="empty-state">Nenhuma integração disponível neste momento.</div>` : ""}
     </section>
-  `;
-
-  const advanced = `
-    <details class="advanced-section">
-      <summary><span class="advanced-title">Configurações avançadas</span><span class="advanced-caret"></span></summary>
-      <div class="advanced-body">
-        <form id="meta-connection-form" class="stack-form compact-form">
-          <div class="form-title">Meta Ads</div>
-          <label><span>Status</span>
-            <select id="meta-status">
-              <option value="not_connected" ${meta.status === "not_connected" ? "selected" : ""}>Não conectado</option>
-              <option value="connected" ${meta.status === "connected" ? "selected" : ""}>Conectado</option>
-              <option value="needs_reconnect" ${meta.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
-            </select>
-          </label>
-          <label><span>ID da conta de anúncios</span><input id="meta-ad-account-id" type="text" value="${escapeHtml(meta.adAccountId || "")}" placeholder="act_..." /></label>
-          <button type="submit">Salvar Meta</button>
-        </form>
-
-        <form id="perfectpay-connection-form" class="stack-form compact-form">
-          <div class="form-title">Perfect Pay</div>
-          <label><span>Status</span>
-            <select id="perfectpay-status">
-              <option value="not_connected" ${perfectPay.status === "not_connected" ? "selected" : ""}>Não conectado</option>
-              <option value="connected" ${perfectPay.status === "connected" ? "selected" : ""}>Conectado</option>
-              <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
-            </select>
-          </label>
-          <label><span>URL de eventos</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
-          <label><span>Segredo compartilhado</span><input id="perfectpay-webhook-secret" type="password" value="${escapeHtml(perfectPay.webhookSecret || "")}" placeholder="Segredo" /></label>
-          <button type="submit">Salvar Perfect Pay</button>
-        </form>
-      </div>
-    </details>
   `;
 
   const guide = sectionPanel(
@@ -683,19 +955,21 @@ function connectionsPage(data) {
     `
   );
 
-  return `${hero}${cards}${advanced}${guide}`;
+  return `${hero}${cards}${connectionAdvanced(integrations)}${guide}`;
 }
 
 function settingsPage(data) {
-  const settings = data.settings;
+  const settings = data.settings || {};
+  const general = settings.general || {};
   return sectionPanel(
     "Configurações",
     "Preferências da sua conta.",
     `
     <form id="settings-form" class="settings-grid">
-      <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(settings.general.companyName)}" /></label>
-      <label><span>Fuso horário</span><input id="timezone" type="text" value="${escapeHtml(settings.general.timezone)}" /></label>
-      <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(settings.general.currency)}" /></label>
+      <label><span>Nome da empresa</span><input id="company-name" type="text" value="${escapeHtml(general.companyName || "")}" /></label>
+      <label><span>Fuso horário</span><input id="timezone" type="text" value="${escapeHtml(general.timezone || "")}" /></label>
+      <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(general.currency || "")}" /></label>
+      <div class="form-actions"><button type="submit" id="save-settings-submit">Salvar</button><span class="form-status" id="settings-form-status"></span></div>
     </form>
     `
   );
@@ -746,75 +1020,97 @@ function renderSkeleton() {
   `;
 }
 
+const renderers = {
+  dashboard: dashboardPage,
+  sales: salesPage,
+  funnel: funnelPage,
+  metrics: metricsPage,
+  products: productsPage,
+  connections: connectionsPage,
+  settings: settingsPage,
+  logs: logsPage,
+};
+
 function renderPage() {
   const root = el("page-root");
-  if (state.loading && !state.data) {
+  const data = state.routeData;
+  if (state.loading && !data) {
     pageTitle(state.route);
     pageControls(state.route);
     root.innerHTML = renderSkeleton();
     attachPageHandlers();
     return;
   }
-  const data = state.data || {};
+  const pageData = data || state.dataCache[state.route] || {};
+  state.routeData = pageData;
   pageTitle(state.route);
   pageControls(state.route);
-
-  const renderers = {
-    dashboard: dashboardPage,
-    sales: salesPage,
-    funnel: funnelPage,
-    metrics: metricsPage,
-    products: productsPage,
-    connections: connectionsPage,
-    settings: settingsPage,
-    logs: logsPage,
-  };
-  root.innerHTML = renderers[state.route](data);
-  if (state.route === "dashboard" || state.route === "funnel") {
-    animateFunnel(data.funnel?.stages || []);
+  root.innerHTML = renderers[state.route](pageData);
+  if ((state.route === "dashboard" || state.route === "funnel") && pageData.funnel?.stages) {
+    animateFunnel(pageData.funnel.stages);
   }
   attachPageHandlers();
 }
 
+/* ------------------------------------------------------------- Handlers */
+
 function attachPageHandlers() {
   const refresh = el("refresh-button");
-  if (refresh) refresh.onclick = loadDataAndRender;
+  if (refresh) refresh.onclick = () => loadData(state.route);
+
+  const reload = el("reload-button");
+  if (reload) reload.onclick = () => loadData(state.route);
 
   const source = el("source-filter");
   if (source) {
     source.onchange = () => {
       state.source = source.value;
-      loadDataAndRender();
+      state.dataCache.dashboard = null;
+      state.dataCache.funnel = null;
+      state.dataCache.metrics = null;
+      loadData(state.route);
     };
   }
 
-  const logout = el("logout-button");
-  if (logout) {
-    logout.onclick = async () => {
-      try {
-        await apiFetch("/api/auth/logout", { method: "POST", body: "{}" });
-      } finally {
-        stopPolling();
-        state.token = "";
-        state.user = null;
-        state.csrfToken = "";
-        localStorage.removeItem(TOKEN_KEY);
-        localStorage.removeItem("trackroi_csrf");
-        showLogin();
-      }
-    };
-  }
+  el("logout-button").onclick = async () => {
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST", body: "{}" });
+    } finally {
+      stopSSE();
+      state.token = "";
+      state.user = null;
+      state.csrfToken = "";
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(CSRF_KEY);
+      showLogin();
+    }
+  };
+
+  document.querySelectorAll("[data-connect-button]").forEach((button) => {
+    button.onclick = () => connectProvider(button.dataset.connectButton, button);
+  });
+  document.querySelectorAll("[data-test-button]").forEach((button) => {
+    button.onclick = () => testProvider(button.dataset.testButton, button);
+  });
 
   const productForm = el("product-form");
   if (productForm) {
     productForm.onsubmit = async (event) => {
       event.preventDefault();
+      const submit = productForm.querySelector("button[type=submit]");
       const name = el("product-name").value.trim();
       const priceInput = el("product-price").value.replace(",", ".");
       const price = Number(priceInput || 0);
       if (!name) return;
-      await apiFetch("/api/products", { method: "POST", body: JSON.stringify({ name, priceCents: Math.round(price * 100) }) });
-      await loadDataAndRender();
+      setButtonLoading(submit, "Adicionando…");
+      try {
+        await apiFetch("/api/products", { method: "POST", body: JSON.stringify({ name, priceCents: Math.round(price * 100) }) });
+        await loadData(state.route);
+      } catch (error) {
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
     };
   }
 
@@ -822,15 +1118,23 @@ function attachPageHandlers() {
   if (metaConnectionForm) {
     metaConnectionForm.onsubmit = async (event) => {
       event.preventDefault();
-      await apiFetch("/api/integrations/meta", {
-        method: "PUT",
-        body: JSON.stringify({
-          status: el("meta-status").value,
-          adAccountId: el("meta-ad-account-id").value.trim(),
-        }),
-      });
-      setStatus("Configurações do Meta salvas.");
-      await loadDataAndRender();
+      const submit = el("meta-save-button") || metaConnectionForm.querySelector("button[type=submit]");
+      setButtonLoading(submit, "Salvando…");
+      try {
+        await apiFetch("/api/integrations/meta", {
+          method: "PUT",
+          body: JSON.stringify({
+            status: el("meta-status").value,
+            adAccountId: el("meta-ad-account-id").value.trim(),
+          }),
+        });
+        setStatus("Configurações do Meta salvas.", "success");
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
     };
   }
 
@@ -838,18 +1142,23 @@ function attachPageHandlers() {
   if (perfectPayConnectionForm) {
     perfectPayConnectionForm.onsubmit = async (event) => {
       event.preventDefault();
-      await apiFetch("/api/integrations/perfectpay", {
-        method: "PUT",
-        body: JSON.stringify({
-          status: el("perfectpay-status").value,
-          webhookSecret: el("perfectpay-webhook-secret").value.trim(),
-          webhookUrl: el("perfectpay-webhook-url").value.trim(),
-          webhookStatus: "configured",
-          apiStatus: "configured",
-        }),
-      });
-      setStatus("Configurações da Perfect Pay salvas.");
-      await loadDataAndRender();
+      const submit = el("perfectpay-save-button") || perfectPayConnectionForm.querySelector("button[type=submit]");
+      const payload = {
+        status: el("perfectpay-status").value,
+        webhookUrl: el("perfectpay-webhook-url").value.trim(),
+      };
+      const secret = el("perfectpay-webhook-secret").value.trim();
+      if (secret) payload.webhookSecret = secret;
+      setButtonLoading(submit, "Salvando…");
+      try {
+        await apiFetch("/api/integrations/perfectpay", { method: "PUT", body: JSON.stringify(payload) });
+        setStatus("Configurações da Perfect Pay salvas.", "success");
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
     };
   }
 
@@ -865,6 +1174,9 @@ function attachPageHandlers() {
   if (settingsForm) {
     settingsForm.onsubmit = async (event) => {
       event.preventDefault();
+      const submit = el("save-settings-submit");
+      const statusNode = el("settings-form-status");
+      setButtonLoading(submit, "Salvando…");
       const payload = {
         general: {
           companyName: el("company-name").value.trim(),
@@ -872,9 +1184,16 @@ function attachPageHandlers() {
           currency: el("currency").value.trim(),
         },
       };
-      await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
-      setStatus("Configurações salvas.");
-      await loadDataAndRender();
+      try {
+        await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+        if (statusNode) statusNode.textContent = "Salvo.";
+        setStatus("Configurações salvas.", "success");
+      } catch (error) {
+        if (statusNode) statusNode.textContent = "";
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
     };
   }
 
@@ -887,46 +1206,7 @@ function attachPageHandlers() {
   }
 }
 
-async function loadDataAndRender() {
-  state.loading = true;
-  setStatus("");
-  if (!state.data) renderPage();
-  try {
-    const [dashboard, sales, products, settings, integrations, auditLogs, webhookEvents] = await Promise.all([
-      apiFetch(`/api/dashboard?source=${encodeURIComponent(state.source)}`),
-      apiFetch("/api/sales"),
-      apiFetch("/api/products"),
-      apiFetch("/api/settings"),
-      apiFetch("/api/integrations"),
-      apiFetch("/api/audit-logs"),
-      apiFetch("/api/webhook-events"),
-    ]);
-
-    state.data = {
-      ...dashboard,
-      sales: sales.items,
-      products: products.items,
-      settings: settings.settings,
-      integrations: integrations.items,
-      auditLogs: auditLogs.items,
-      webhookEvents: webhookEvents.items,
-    };
-    state.loading = false;
-    renderPage();
-    if (dashboard.empty) {
-      setStatus("");
-    } else {
-      setStatus(`Tudo em dia: ${dashboard.summary.totalSales} vendas e ${dashboard.summary.clickCount} cliques rastreados.`);
-    }
-  } catch (error) {
-    state.loading = false;
-    if (error.message === "AUTH_REQUIRED") {
-      showLogin();
-      return;
-    }
-    setStatus(`Não foi possível atualizar os dados: ${error.message}`);
-  }
-}
+/* ------------------------------------------------------------- Auth */
 
 async function login(email, password) {
   const result = await apiFetch("/api/auth/login", {
@@ -938,28 +1218,10 @@ async function login(email, password) {
   state.user = result.user;
   state.csrfToken = result.csrfToken || "";
   localStorage.setItem(TOKEN_KEY, result.token);
-  if (state.csrfToken) localStorage.setItem("trackroi_csrf", state.csrfToken);
+  if (state.csrfToken) localStorage.setItem(CSRF_KEY, state.csrfToken);
   showApp();
-  startPolling();
-  await loadDataAndRender();
-}
-
-let pollingTimer = null;
-
-function startPolling() {
-  stopPolling();
-  pollingTimer = setInterval(() => {
-    if (state.token && state.user && !state.loading) {
-      loadDataAndRender();
-    }
-  }, 30000);
-}
-
-function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
+  startSSE();
+  await loadData();
 }
 
 async function bootstrap() {
@@ -969,17 +1231,23 @@ async function bootstrap() {
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     setLoginError("");
+    const submit = el("login-form").querySelector("button[type=submit]");
+    setButtonLoading(submit, "Entrando…");
     try {
       await login(el("email-input").value.trim(), el("password-input").value);
     } catch (error) {
-      setLoginError(error.message === "AUTH_REQUIRED" ? "Sessão expirada. Faça login novamente." : error.message);
+      setLoginError(friendlyError(error));
+    } finally {
+      setButtonLoading(submit, "");
     }
   });
 
-  window.addEventListener("hashchange", async () => {
-    state.route = normalizeRoute(location.hash.slice(1) || "dashboard");
+  window.addEventListener("hashchange", () => {
+    const next = normalizeRoute(location.hash.slice(1) || "dashboard");
+    if (next === state.route) return;
+    state.route = next;
     updateNav();
-    if (state.data) renderPage();
+    loadData(next);
   });
 
   if (state.token) {
@@ -987,15 +1255,15 @@ async function bootstrap() {
       const me = await apiFetch("/api/auth/me");
       state.user = me.user;
       state.csrfToken = me.csrfToken || "";
-      localStorage.setItem("trackroi_csrf", state.csrfToken);
+      localStorage.setItem(CSRF_KEY, state.csrfToken);
       showApp();
-      startPolling();
-      await loadDataAndRender();
+      startSSE();
+      await loadData();
       return;
     } catch {
       state.token = "";
       localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem("trackroi_csrf");
+      localStorage.removeItem(CSRF_KEY);
     }
   }
 

@@ -95,6 +95,23 @@ function friendlyError(error) {
   return message || "Algo deu errado. Tente novamente.";
 }
 
+function pixelErrorMarkup(error) {
+  const message = escapeHtml(friendlyError(error));
+  const debug = error?.debug;
+  if (!debug || (!debug.message && !debug.code)) return `<span>${message}</span>`;
+  const lines = [
+    debug.message ? `Mensagem: ${escapeHtml(debug.message)}` : null,
+    debug.code ? `Código: ${escapeHtml(String(debug.code))}` : null,
+    debug.type ? `Tipo: ${escapeHtml(debug.type)}` : null,
+    debug.subcode ? `Subcódigo: ${escapeHtml(String(debug.subcode))}` : null,
+    debug.fbtrace_id ? `FB Trace: ${escapeHtml(debug.fbtrace_id)}` : null,
+  ].filter(Boolean);
+  return `
+    <span>${message}</span>
+    <details class="error-debug"><summary><small>detalhes técnicos</small></summary><small>${lines.join("<br>")}</small></details>
+  `;
+}
+
 async function apiFetch(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -127,7 +144,9 @@ async function apiFetch(path, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(body.error || `Erro ao processar a solicitação`);
+    const error = new Error(body.error || `Erro ao processar a solicitação`);
+    if (body.debug && (body.debug.message || body.debug.code)) error.debug = body.debug;
+    throw error;
   }
   return body;
 }
@@ -2073,7 +2092,7 @@ const pixelForm = el("pixel-form");
         const message = friendlyError(error);
         setStatus(message, "error");
         if (messageNode) {
-          messageNode.textContent = message;
+          messageNode.innerHTML = pixelErrorMarkup(error);
           messageNode.classList.add("is-error");
           messageNode.hidden = false;
         }
@@ -2102,7 +2121,7 @@ const pixelForm = el("pixel-form");
         await loadData(state.route, { silent: true });
       } catch (error) {
         const message = friendlyError(error);
-        if (statusNode) statusNode.textContent = message;
+        if (statusNode) statusNode.innerHTML = pixelErrorMarkup(error);
         setStatus(message, "error");
       }
     };

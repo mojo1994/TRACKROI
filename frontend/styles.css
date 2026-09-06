@@ -1907,6 +1907,20 @@ button.is-loading::after {
   color: #ffb3b3;
 }
 
+.error-debug {
+  margin-top: 6px;
+  opacity: 0.75;
+}
+
+.error-debug summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.error-debug small {
+  color: var(--muted);
+}
+
 .connection-message.is-success {
   background: rgba(57, 255, 136, 0.06);
   border: 1px solid rgba(57, 255, 136, 0.2);

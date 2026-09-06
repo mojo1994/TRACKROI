@@ -604,14 +604,15 @@ async function handlePixelPut(req, res, user) {
   try {
     verified = await metaPixel.validateCredentials({ pixelId, accessToken });
   } catch (error) {
+    const debug = error.raw || null;
     db.appendAuditLog({
       actorUserId: user.id,
       action: "pixel.validate_failed",
       resourceType: "pixel",
       resourceId: "meta_pixel",
-      metadata: { pixelId, error: error.message },
+      metadata: { pixelId, error: error.message, debug },
     });
-    send(res, 400, { ok: false, error: error.message }, {}, req);
+    send(res, 400, { ok: false, error: error.message, debug }, {}, req);
     return;
   }
 
@@ -676,14 +677,15 @@ async function handlePixelTest(req, res, user) {
     });
     send(res, 200, { ok: true, ...result }, {}, req);
   } catch (error) {
+    const debug = error.raw || null;
     db.appendAuditLog({
       actorUserId: user.id,
       action: "pixel.test_failed",
       resourceType: "pixel",
       resourceId: "meta_pixel",
-      metadata: { error: error.message },
+      metadata: { error: error.message, debug },
     });
-    send(res, 502, { ok: false, error: error.message }, {}, req);
+    send(res, 502, { ok: false, error: error.message, debug }, {}, req);
   }
 }
 

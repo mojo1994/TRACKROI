@@ -41,22 +41,39 @@ async function graphRequest(path, { method = "GET", body = null, timeoutMs = 800
 }
 
 function parseMetaError(payload) {
-  const error = payload?.error || {};
-  const code = Number(error.code);
-  const message = String(error.message || "");
+  const err = payload?.error || {};
+  const code = Number(err.code);
+  const message = String(err.message || "");
   const lower = message.toLowerCase();
+  const raw = {
+    code,
+    type: err.type || null,
+    subcode: err.error_subcode ?? err.subcode ?? null,
+    message,
+    fbtrace_id: err.fbtrace_id || null,
+  };
+  const makeError = (msg, metaCode) => {
+    const e = new Error(msg);
+    e.metaCode = metaCode;
+    e.raw = raw;
+    return e;
+  };
   if (code === 190 || /token.*(invalid|expired)|invalid.*token|expired.*token/.test(lower)) {
-    return new Error("Token inválido ou expirado para este Pixel.");
+    return makeError("Token inválido ou expirado para este Pixel.", 190);
   }
-  if (code === 100 || /missing permissions?|permission/i.test(lower)) {
-    const error100 = new Error("Token sem permissão para este Pixel.");
-    error100.metaCode = 100;
-    return error100;
+  if (/missing permissions?|no permission(?!\s*to (read|access))|permission denied|not allowed|not authorized|does not have permission|without permission|access to this (pixel|object)|cannot (perform|take this action)/i.test(lower)) {
+    return makeError(
+      "O token não tem permissão para gerenciar eventos deste Pixel. Confira se o seu usuário tem papel de 'Gerenciar eventos' (admin) no Business Manager dono do Pixel e gere um novo token logado nessa conta.",
+      100
+    );
   }
   if (code === 803 || /not exist|do not exist|not found|aliases/i.test(lower)) {
-    return new Error("Pixel não encontrado. Confira se o ID do Pixel está correto e se o token foi gerado para esse mesmo Pixel (Gerenciador de Eventos).");
+    return makeError("Pixel não encontrado. Confira se o ID do Pixel está correto e se o token foi gerado para esse mesmo Pixel (Gerenciador de Eventos).", 803);
   }
-  return new Error(message || "A Meta rejeitou a solicitação.");
+  if (code === 100 || /invalid parameter|is not valid|invalid payload|unsupported|exceeded max/i.test(lower)) {
+    return makeError(`A Meta rejeitou o envio (erro #${code || 100}). ${message}`, 200);
+  }
+  return makeError(message || `A Meta rejeitou a solicitação (código ${code || "desconhecido"}).`, code || 0);
 }
 
 async function validateCredentials({ pixelId, accessToken }) {
@@ -76,7 +93,11 @@ async function validateCredentials({ pixelId, accessToken }) {
     const readError = read ? parseMetaError(read.body) : null;
     if (readError && readError.metaCode !== 100) throw readError;
     if (eventError.metaCode === 100) {
-      throw new Error("O token não tem permissão para enviar eventos a este Pixel. Gere um novo token no Gerenciador de Eventos → API de Conversões.");
+      const permission = new Error(
+        "O token não tem permissão para enviar eventos a este Pixel. Confira o papel do seu usuário no Business Manager dono do Pixel (precisa gerenciar eventos) e gere um novo token nessa conta."
+      );
+      permission.raw = eventError.raw;
+      throw permission;
     }
     throw eventError;
   }
@@ -136,13 +157,17 @@ async function sendConversionEvent({ pixelId, accessToken, event, testEventCode 
   };
 }
 
+function sanitizeEventId(value) {
+  return String(value ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 64) || `trackroievent${Date.now()}`;
+}
+
 async function sendTestEvent({ pixelId, accessToken, testEventCode }) {
   const code = String(testEventCode || "").trim() || `trackroi_test_event_${Date.now()}`;
   const event = {
     event_name: "Lead",
     event_time: Math.floor(Date.now() / 1000),
     action_source: "website",
-    event_id: `trackroi-test-${Date.now()}`,
+    event_id: sanitizeEventId(`trackroiTest${Date.now()}`),
     user_data: {
       client_ip_address: "127.0.0.1",
       client_user_agent: CLIENT_USER_AGENT,
@@ -154,7 +179,7 @@ async function sendTestEvent({ pixelId, accessToken, testEventCode }) {
 async function sendPurchaseForSale({ pixelId, accessToken, event, valueCents, currency, quantity, contentName, email, fbclid, clickCreatedAt, eventSourceUrl, clientIpAddress }) {
   const fbc = buildFbc(fbclid, clickCreatedAt);
   const purchase = buildPurchaseEvent({
-    eventId: event,
+    eventId: sanitizeEventId(event),
     valueCents,
     currency,
     quantity,

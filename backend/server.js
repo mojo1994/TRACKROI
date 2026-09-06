@@ -1209,6 +1209,21 @@ async function handlePerfectPayWebhook(req, res) {
     dashboardId = connectedOnes[0].dashboardId;
   }
   if (!dashboardId) {
+    const tokenFromBody = String(body?.token || body?.webhook_token || "").trim();
+    if (tokenFromBody) {
+      const matched = dashboardsWithPp.find((entry) => {
+        const integration = db.getIntegration("perfectpay", entry.dashboardId);
+        if (!integration.webhookToken) return false;
+        try {
+          return String(decryptSecret(integration.webhookToken)).trim() === tokenFromBody;
+        } catch {
+          return false;
+        }
+      });
+      if (matched) dashboardId = matched.dashboardId;
+    }
+  }
+  if (!dashboardId) {
     db.appendAuditLog({
       action: "webhook.unknown_dashboard",
       resourceType: "webhook_event",
@@ -1381,6 +1396,96 @@ function paginateSql(total, rows, query) {
   };
 }
 
+/* ------------------------------------------------------------- Perfect Pay self-test */
+
+function postInternalWebhook(payload, dashboardId) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify(payload);
+    const pathname = `/api/webhooks/perfectpay?dash=${encodeURIComponent(dashboardId || "")}`;
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: PORT,
+        method: "POST",
+        path: pathname,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (response) => {
+        let data = "";
+        response.on("data", (chunk) => {
+          data += chunk;
+        });
+        response.on("end", () => {
+          let parsed;
+          try {
+            parsed = JSON.parse(data || "{}");
+          } catch {
+            parsed = { raw: data };
+          }
+          resolve({ status: response.statusCode, body: parsed });
+        });
+      }
+    );
+    req.setTimeout(10000, () => {
+      req.destroy();
+      resolve({ status: 0, body: { ok: false, error: "Timeout ao processar o webhook de teste." } });
+    });
+    req.on("error", (error) => {
+      resolve({ status: 0, body: { ok: false, error: error.message } });
+    });
+    req.end(body);
+  });
+}
+
+async function handlePerfectPaySelfTest(req, res, user) {
+  const dashboardId = resolveDashboardId({ user }, req);
+  const integration = db.getIntegration("perfectpay", dashboardId);
+  if (!integration.updated_at) {
+    send(res, 400, { ok: false, error: "Conecte a Perfect Pay primeiro (botão Configurar webhook)." }, {}, req);
+    return;
+  }
+  const transactionId = `TRACKROI-TEST-${Date.now()}`;
+  const configuredToken = integration.webhookToken ? decryptSecret(integration.webhookToken) : "";
+  const payload = {
+    sale_status_enum: 2,
+    sale_amount: 0.01,
+    code: transactionId,
+    sale_status_detail: "approved",
+    webhook_owner: "manual-test",
+    quantity: 1,
+    date_approved: new Date().toISOString(),
+    date_created: new Date().toISOString(),
+    product: { name: "Teste de webhook" },
+    customer: { email: null, name: null },
+    metadata: {},
+  };
+  if (configuredToken) payload.token = configuredToken;
+  const result = await postInternalWebhook(payload, dashboardId);
+  db.appendAuditLog({
+    actorUserId: user.id,
+    action: "webhook.self_test",
+    resourceType: "webhook_event",
+    resourceId: db.makeId("we"),
+    metadata: { transactionId, httpStatus: result.status, code: result.body?.sale_status || result.body?.error || null },
+  });
+  if (result.status === 200 && result.body?.ok) {
+    send(res, 200, {
+      ok: true,
+      transactionId,
+      message: "Webhook de teste enviado e processado com sucesso. Uma notificação deve aparecer agora.",
+    }, {}, req);
+    return;
+  }
+  send(res, 502, {
+    ok: false,
+    error: result.body?.error || `O webhook respondeu ${result.status || "erro"}.`,
+    transactionId,
+  }, {}, req);
+}
+
 /* ------------------------------------------------------------- Main server */
 
 function requireAuthAndCsrf(req, res) {
@@ -1472,9 +1577,15 @@ async function main() {
         return;
       }
 
-      if (req.method === "POST" && pathname === "/api/webhooks/perfectpay") {
-        await handlePerfectPayWebhook(req, res);
-        return;
+      if (pathname === "/api/webhooks/perfectpay") {
+        if (req.method === "GET" || req.method === "HEAD") {
+          send(res, 200, { ok: true, message: "Perfect Pay webhook endpoint ativo. Agora aguardando eventos (POST)." }, {}, req);
+          return;
+        }
+        if (req.method === "POST") {
+          await handlePerfectPayWebhook(req, res);
+          return;
+        }
       }
 
       const connectMatch = pathname.match(/^\/api\/integrations\/connect\/([a-z]+)\/callback$/);
@@ -1650,6 +1761,11 @@ async function main() {
       if (req.method === "GET" && pathname === "/api/integrations") {
         const dashboardId = resolveDashboardId(auth, req);
         send(res, 200, { ok: true, items: listPublicIntegrations(dashboardId) }, {}, req);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/integrations/perfectpay/test") {
+        await handlePerfectPaySelfTest(req, res, auth.user);
         return;
       }
 

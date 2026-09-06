@@ -1459,7 +1459,11 @@ function connectionAdvanced(integrations) {
             <input id="perfectpay-webhook-secret" type="password" placeholder="Novo segredo (opcional)" value="" />
           </label>
           <p class="form-hint">No painel da Perfect Pay, crie um webhook apontando para a URL acima e ative os eventos de venda (aprovação, pré-checkout etc.). O TrackROI valida o token do postback no recebimento para garantir que ele veio da sua conta.</p>
-          <button type="submit" id="perfectpay-save-button">Salvar Perfect Pay</button>
+          <div class="connection-actions">
+            <button type="submit" id="perfectpay-save-button">Salvar Perfect Pay</button>
+            <button type="button" class="btn-secondary" id="perfectpay-test-button">Testar webhook</button>
+            <span class="import-status" id="perfectpay-test-status"></span>
+          </div>
         </form>
       </div>
     </details>
@@ -2064,6 +2068,27 @@ function attachPageHandlers() {
         setStatus(friendlyError(error), "error");
       } finally {
         setButtonLoading(submit, "");
+      }
+    };
+  }
+
+  const perfectPayTestButton = el("perfectpay-test-button");
+  if (perfectPayTestButton) {
+    perfectPayTestButton.onclick = async () => {
+      const statusNode = el("perfectpay-test-status");
+      setButtonLoading(perfectPayTestButton, "Enviando teste…");
+      if (statusNode) statusNode.textContent = "";
+      try {
+        const result = await apiFetch("/api/integrations/perfectpay/test", { method: "POST", body: "{}" });
+        if (statusNode) statusNode.textContent = "Enviado — foi criada uma venda de R$ 0,01 como teste no seu painel.";
+        setStatus(result.message || "Webhook de teste processado com sucesso.", "success");
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        const message = friendlyError(error);
+        setStatus(message, "error");
+        if (statusNode) statusNode.textContent = message;
+      } finally {
+        setButtonLoading(perfectPayTestButton, "");
       }
     };
   }

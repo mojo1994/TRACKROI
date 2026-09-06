@@ -187,7 +187,7 @@ const provider = {
 
     const insightsUrl = new URL(`https://graph.facebook.com/${c.apiVersion}/act_${cleanId}/insights`);
     insightsUrl.searchParams.set("level", "campaign");
-    insightsUrl.searchParams.set("fields", "campaign_id,campaign_name,spend,impressions,clicks,cpc,ctr,cpm,reach,actions,action_values,purchase_roas,cost_per_result_type,result_type");
+    insightsUrl.searchParams.set("fields", "campaign_id,campaign_name,spend,impressions,clicks,cpc,ctr,cpm,reach,actions,action_values,purchase_roas");
     insightsUrl.searchParams.set("time_range", timeRange);
     insightsUrl.searchParams.set("limit", "500");
     insightsUrl.searchParams.set("access_token", token);

@@ -514,7 +514,7 @@ const routeFetch = {
     const query = dashboardQuery();
     const [dashboard, adsManager] = await Promise.all([
       apiFetch(`/api/dashboard?${query}`),
-      apiFetch(`/api/meta/ads-campaigns?${query}`).catch(() => null),
+      apiFetch(`/api/meta/ads-campaigns?${query}`).catch((error) => ({ connected: null, error: friendlyError(error) })),
     ]);
     return { ok: true, ...dashboard, adsManager };
   },
@@ -1168,6 +1168,18 @@ function adsMetricLabel(key) {
 function adsManagerPanel(manager) {
   if (!manager) return "";
   const connected = manager.connected === true;
+  if (connected === null) {
+    return sectionPanel(
+      "Campanhas",
+      "Não foi possível carregar as campanhas agora.",
+      `
+        <div class="empty-state">
+          ${escapeHtml(manager.error || "Não foi possível buscar as campanhas da Meta Ads.")}
+          <button type="button" class="btn-ghost" id="ads-retry-button" style="display:inline-block;margin-top:12px;">Tentar novamente</button>
+        </div>
+      `
+    );
+  }
   if (!connected) {
     return sectionPanel(
       "Campanhas",
@@ -1866,7 +1878,19 @@ function settingsPage(data) {
         : permissionStatus === "unsupported"
           ? "Navegador não suporta"
           : "Pendente — clique em \"Permitir\"";
+  const profile = state.user || {};
   return `
+    ${sectionPanel(
+      "Perfil",
+      "Seus dados de cadastro. O nome é usado na barra lateral do sistema.",
+      `
+      <form id="profile-form" class="settings-grid">
+        <label><span>Seu nome</span><input id="profile-name" type="text" value="${escapeHtml(profile.name || "")}" autocomplete="name" /></label>
+        <label><span>Seu e-mail</span><input id="profile-email" type="email" value="${escapeHtml(profile.email || "")}" autocomplete="email" /></label>
+        <div class="form-actions"><button type="submit" id="save-profile-button">Salvar perfil</button><span class="form-status" id="profile-form-status"></span></div>
+      </form>
+      `
+    )}
     ${sectionPanel(
       "Configurações",
       "Preferências da sua conta.",
@@ -2238,6 +2262,9 @@ function attachPageHandlers() {
   const mobileRefresh = el("mobile-refresh-button");
   if (mobileRefresh) mobileRefresh.onclick = () => loadData(state.route);
 
+  const adsRetryButton = el("ads-retry-button");
+  if (adsRetryButton) adsRetryButton.onclick = () => loadData(state.route);
+
   document.querySelectorAll(".ads-expand").forEach((button) => {
     button.onclick = () => {
       const row = button.closest("tr");
@@ -2547,6 +2574,32 @@ const pixelForm = el("pixel-form");
         await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
         if (statusNode) statusNode.textContent = "Salvo.";
         setStatus("Configurações salvas.", "success");
+      } catch (error) {
+        if (statusNode) statusNode.textContent = "";
+        setStatus(friendlyError(error), "error");
+      } finally {
+        setButtonLoading(submit, "");
+      }
+    };
+  }
+
+  const profileForm = el("profile-form");
+  if (profileForm) {
+    profileForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const submit = el("save-profile-button");
+      const statusNode = el("profile-form-status");
+      setButtonLoading(submit, "Salvando…");
+      const payload = {
+        name: el("profile-name").value.trim(),
+        email: el("profile-email").value.trim(),
+      };
+      try {
+        const response = await apiFetch("/api/auth/profile", { method: "PUT", body: JSON.stringify(payload) });
+        if (response?.user) state.user = response.user;
+        updateSidebarUser();
+        if (statusNode) statusNode.textContent = "Perfil salvo.";
+        setStatus("Perfil atualizado.", "success");
       } catch (error) {
         if (statusNode) statusNode.textContent = "";
         setStatus(friendlyError(error), "error");

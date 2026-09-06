@@ -1208,6 +1208,48 @@ async function handleAuthMe(req, res) {
   }, {}, req);
 }
 
+async function handleProfileUpdate(req, res) {
+  const auth = requireAuth(req);
+  if (!auth) {
+    send(res, 401, { ok: false, error: "Não autenticado" }, {}, req);
+    return;
+  }
+  const csrfHeader = String(req.headers["x-csrf-token"] || "").trim();
+  if (!db.verifyCsrfToken(csrfHeader, auth.user.id)) {
+    send(res, 403, { ok: false, error: "Sessão expirada. Recarregue a página." }, {}, req);
+    return;
+  }
+  let body;
+  try {
+    body = await parseBody(req);
+  } catch (error) {
+    send(res, 400, { ok: false, error: error.message }, {}, req);
+    return;
+  }
+  const nextName = String(body?.name || "").trim();
+  const nextEmail = String(body?.email || "").trim().toLowerCase();
+  if (!nextName) {
+    send(res, 400, { ok: false, error: "Informe seu nome" }, {}, req);
+    return;
+  }
+  if (!nextEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+    send(res, 400, { ok: false, error: "Informe um e-mail válido" }, {}, req);
+    return;
+  }
+  const taken = db.getUserByEmail(nextEmail);
+  if (taken && taken.id !== auth.user.id) {
+    send(res, 409, { ok: false, error: "Este e-mail já está cadastrado" }, {}, req);
+    return;
+  }
+  const updated = db.updateUserProfile(auth.user.id, { name: nextName, email: nextEmail });
+  db.appendAuditLog({ actorUserId: auth.user.id, action: "user.profile.update", resourceType: "user", resourceId: auth.user.id });
+  broadcastSSE({ type: "data", changed: ["settings"] }, auth.user.id);
+  send(res, 200, {
+    ok: true,
+    user: db.publicUser(updated),
+  }, {}, req);
+}
+
 async function handleAuthLogout(req, res) {
   const auth = requireAuth(req);
   if (auth) {
@@ -1625,6 +1667,10 @@ async function main() {
       }
       if (req.method === "GET" && pathname === "/api/auth/me") {
         await handleAuthMe(req, res);
+        return;
+      }
+      if (req.method === "PUT" && pathname === "/api/auth/profile") {
+        await handleProfileUpdate(req, res);
         return;
       }
       if (req.method === "POST" && pathname === "/api/auth/logout") {

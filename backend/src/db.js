@@ -407,6 +407,16 @@ function getUserById(id) {
   return get("SELECT * FROM users WHERE id = ?", [id]);
 }
 
+function updateUserProfile(id, { name, email }) {
+  const nextName = String(name || "").trim();
+  const nextEmail = String(email || "").trim().toLowerCase();
+  run(
+    "UPDATE users SET name = ?, email = ? WHERE id = ?",
+    [nextName, nextEmail, id]
+  );
+  return getUserById(id);
+}
+
 function createUser({ name, email, role = "admin", password }) {
   const user = {
     id: `user_${crypto.randomUUID()}`,
@@ -424,7 +434,7 @@ function createUser({ name, email, role = "admin", password }) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role };
+  return { id: user.id, name: user.name, email: user.email, role: user.role, createdAt: user.created_at };
 }
 
 /* ------------------------------------------------------------- Sessions */
@@ -1223,6 +1233,7 @@ module.exports = {
   getUserById,
   createUser,
   publicUser,
+  updateUserProfile,
   createSession,
   deleteSession,
   getUserByToken,

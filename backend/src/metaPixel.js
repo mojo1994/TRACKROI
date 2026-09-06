@@ -145,7 +145,10 @@ async function sendConversionEvent({ pixelId, accessToken, event, testEventCode 
   const body = { data: [event] };
   const code = String(testEventCode || "").trim();
   if (code) body.test_event_code = code;
-  const result = await graphRequest(`/${encodeURIComponent(pixelId)}/events`, { method: "POST", body });
+  const result = await graphRequest(
+    `/${encodeURIComponent(pixelId)}/events?access_token=${encodeURIComponent(accessToken)}`,
+    { method: "POST", body }
+  );
   if (!result) {
     throw new Error("Não foi possível enviar o evento para a Meta agora. Verifique sua conexão e tente novamente.");
   }

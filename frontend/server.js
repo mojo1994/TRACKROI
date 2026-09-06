@@ -42,7 +42,9 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, {
       "Content-Type": contentType(filePath),
-      "Cache-Control": "no-store",
+      "Cache-Control": requestPath.startsWith("/notificacao/")
+        ? "public, max-age=31536000, immutable"
+        : "no-store",
     });
 
     if (filePath.endsWith(".html")) {

@@ -144,9 +144,10 @@ function setStatus(message, tone = "") {
 
 /* ------------------------------------------------------------- Notificações */
 
+const NOTIFICATION_ASSET_VERSION = 3;
 const notificationAssets = {
-  sound: `${API_BASE || ""}/notificacao/notificacao.mp3`,
-  icon: `${API_BASE || ""}/notificacao/logo.png`,
+  sound: `${API_BASE || ""}/notificacao/notificacao.mp3?v=${NOTIFICATION_ASSET_VERSION}`,
+  icon: `${API_BASE || ""}/notificacao/logo.notif.png?v=${NOTIFICATION_ASSET_VERSION}`,
 };
 let notificationAudio = null;
 
@@ -180,6 +181,12 @@ function prepareNotificationSound() {
     if (play && play.catch) play.catch(() => {});
   } catch {
     /* ignora bloqueio de autoplay */
+  }
+  try {
+    const prime = new Image();
+    prime.src = notificationAssets.icon;
+  } catch {
+    /* ignora */
   }
 }
 
@@ -2307,6 +2314,7 @@ async function register(name, email, password) {
 async function bootstrap() {
   mountSidebarIcons();
   applySidebarState();
+  prepareNotificationSound();
 
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();

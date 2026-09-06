@@ -82,7 +82,7 @@
           </ul>
         </div>
         <div class="login-form-wrap">
-          <form id="login-form" class="login-form">
+          <form id="login-form" class="login-form" data-auth-form="login">
             <h1>Entrar</h1>
             <p class="panel-line">Acesse o painel com sua conta.</p>
             <label>
@@ -95,6 +95,28 @@
             </label>
             <button type="submit">Entrar</button>
             <div id="login-error" class="login-error" hidden></div>
+            <p class="login-switch"><span>Crie sua conta</span> <button type="button" id="show-register" class="link-button">Cadastrar-se</button></p>
+            <p class="login-privacy"><a href="/politica-de-privacidade">Política de Privacidade</a></p>
+          </form>
+
+          <form id="register-form" class="login-form" data-auth-form="register" hidden>
+            <h1>Criar conta</h1>
+            <p class="panel-line">Tenha seu próprio dashboard de rastreamento.</p>
+            <label>
+              <span>Nome</span>
+              <input id="register-name" type="text" autocomplete="name" placeholder="Seu nome" />
+            </label>
+            <label>
+              <span>Email</span>
+              <input id="register-email" type="email" autocomplete="username" placeholder="voce@empresa.com" />
+            </label>
+            <label>
+              <span>Senha</span>
+              <input id="register-password" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres" />
+            </label>
+            <button type="submit">Criar conta</button>
+            <div id="register-error" class="login-error" hidden></div>
+            <p class="login-switch"><span>Já tem uma conta?</span> <button type="button" id="show-login" class="link-button">Entrar</button></p>
             <p class="login-privacy"><a href="/politica-de-privacidade">Política de Privacidade</a></p>
           </form>
         </div>

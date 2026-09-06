@@ -44,9 +44,22 @@ function send(res, statusCode, body, extraHeaders = {}, req = null) {
     "Content-Type": typeof body === "string" ? "text/plain; charset=utf-8" : "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
     ...headers,
+    ...securityHeaders(),
     ...extraHeaders,
   });
   res.end(payload);
+}
+
+function securityHeaders() {
+  return {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'",
+  };
 }
 
 function readRawBody(req) {
@@ -162,13 +175,41 @@ function requireAuth(req) {
   return { token, user };
 }
 
+function resolveDashboardId(auth, req) {
+  const query = getQuery(req.url);
+  const requested = String(req.headers["x-dashboard-id"] || query.dashboard_id || "").trim();
+  if (requested) {
+    const dash = db.getDashboard(requested);
+    if (dash && String(dash.owner_id) === String(auth.user.id)) return requested;
+  }
+  const dash = db.ensureDefaultDashboard(auth.user.id);
+  return dash.id;
+}
+
 /* ------------------------------------------------------------- SSE */
 
-const eventClients = new Map();
+const eventClientsByUser = new Map();
 
-function broadcastSSE(message) {
+function broadcastSseToUser(userId, message) {
   const payload = `data: ${JSON.stringify(message)}\n\n`;
-  for (const set of eventClients.values()) {
+  const set = eventClientsByUser.get(String(userId));
+  if (!set) return;
+  for (const res of set) {
+    try {
+      res.write(payload);
+    } catch {
+      /* client already gone */
+    }
+  }
+}
+
+function broadcastSSE(message, userId) {
+  if (userId) {
+    broadcastSseToUser(userId, message);
+    return;
+  }
+  const payload = `data: ${JSON.stringify(message)}\n\n`;
+  for (const set of eventClientsByUser.values()) {
     for (const res of set) {
       try {
         res.write(payload);
@@ -181,7 +222,8 @@ function broadcastSSE(message) {
 
 function handleEvents(req, res) {
   const { token } = getQuery(req.url);
-  if (!token || !db.getUserByToken(token)) {
+  const user = token ? db.getUserByToken(token) : null;
+  if (!user) {
     send(res, 401, { ok: false, error: "Não autenticado" }, {}, req);
     return;
   }
@@ -195,10 +237,11 @@ function handleEvents(req, res) {
   res.write(`: connected\n\n`);
   res.write(`data: ${JSON.stringify({ type: "ready" })}\n\n`);
 
-  let set = eventClients.get(token);
+  const userId = String(user.id);
+  let set = eventClientsByUser.get(userId);
   if (!set) {
     set = new Set();
-    eventClients.set(token, set);
+    eventClientsByUser.set(userId, set);
   }
   set.add(res);
 
@@ -213,7 +256,7 @@ function handleEvents(req, res) {
   req.on("close", () => {
     clearInterval(heartbeat);
     set.delete(res);
-    if (!set.size) eventClients.delete(token);
+    if (!set.size) eventClientsByUser.delete(userId);
   });
 }
 
@@ -276,7 +319,7 @@ function oauthResultHtml({ providerId, ok, error, connectedAccount }) {
 </html>`;
 }
 
-function renderPerfectPayForm({ token, error }) {
+function renderPerfectPayForm({ token, dashboardId, error }) {
   const safeError = error ? `<div class="error">${escapeHtml(error)}</div>` : "";
   return `<!doctype html>
 <html lang="pt-BR">
@@ -305,6 +348,7 @@ function renderPerfectPayForm({ token, error }) {
       <p>Use o e-mail e a senha da sua conta Perfect Pay para gerar o token de acesso no backend.</p>
       <form method="post" action="/api/integrations/connect/perfectpay">
         <input type="hidden" name="token" value="${escapeHtml(token)}" />
+        ${dashboardId ? `<input type="hidden" name="dashboard_id" value="${escapeHtml(dashboardId)}" />` : ""}
         <label><span>E-mail da Perfect Pay</span><input name="email" type="email" autocomplete="username" required /></label>
         <label><span>Senha</span><input name="password" type="password" autocomplete="current-password" required /></label>
         <button type="submit">Conectar Perfect Pay</button>
@@ -343,8 +387,11 @@ async function handleConnectStart(req, res, match) {
     send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
     return;
   }
-  const token = String(getQuery(req.url).token || "").trim();
+  const query = getQuery(req.url);
+  const token = String(query.token || "").trim();
   const user = token ? db.getUserByToken(token) : null;
+  const dashboardId = String(query.dashboard_id || "").trim();
+  const scopedDashboard = dashboardId && db.getDashboard(dashboardId) && String(db.getDashboard(dashboardId).owner_id) === String(user?.id) ? dashboardId : null;
   if (!user) {
     sendRawHtml(res, oauthResultHtml({ providerId, ok: false, error: "Sessão expirada. Reabra a página de conexões e tente novamente." }));
     return;
@@ -355,12 +402,13 @@ async function handleConnectStart(req, res, match) {
     return;
   }
   if (provider.id === "perfectpay") {
-    sendRawHtml(res, renderPerfectPayForm({ token, error: "" }));
+    sendRawHtml(res, renderPerfectPayForm({ token, dashboardId: scopedDashboard, error: "" }));
     return;
   }
+  const state = scopedDashboard ? `${token}|${scopedDashboard}` : token;
   let authUrl;
   try {
-    authUrl = provider.getAuthUrl(token);
+    authUrl = provider.getAuthUrl(state);
   } catch (error) {
     sendRawHtml(res, oauthResultHtml({ providerId, ok: false, error: friendlyProviderError(providerId, error) }));
     return;
@@ -369,8 +417,8 @@ async function handleConnectStart(req, res, match) {
   res.end();
 }
 
-function storeConnection(providerId, extra) {
-  const existing = db.getIntegration(providerId);
+function storeConnection(providerId, extra, dashboardId) {
+  const existing = db.getIntegration(providerId, dashboardId);
   db.upsertIntegration(providerId, {
     ...existing,
     status: "connected",
@@ -378,7 +426,7 @@ function storeConnection(providerId, extra) {
     lastSyncAt: new Date().toISOString(),
     errors: [],
     ...extra,
-  });
+  }, dashboardId);
 }
 
 async function handleOAuthCallback(req, res, match) {
@@ -390,7 +438,20 @@ async function handleOAuthCallback(req, res, match) {
   }
   const query = getQuery(req.url);
   try {
-    const user = db.getUserByToken(String(query.state || "").trim());
+    const parts = String(query.state || "").split("|");
+    const sessionToken = parts[0];
+    let dashboardId = parts.length > 1 ? parts[1] : null;
+    const user = db.getUserByToken(sessionToken);
+    if (!user) {
+      sendRawHtml(res, oauthResultHtml({ providerId, ok: false, error: "Sessão expirada. Reabra a página de conexões e tente novamente." }));
+      return;
+    }
+    if (dashboardId) {
+      const dash = db.getDashboard(dashboardId);
+      if (!dash || String(dash.owner_id) !== String(user.id)) {
+        dashboardId = null;
+      }
+    }
     const result = await provider.handleOAuthCallback(query);
     const extra = {
       accessToken: encryptSecret(result.accessToken),
@@ -400,14 +461,15 @@ async function handleOAuthCallback(req, res, match) {
       extra.tokenStatus = "connected";
       extra.adAccountId = result.accountId || null;
     }
-    storeConnection(providerId, extra);
+    storeConnection(providerId, extra, dashboardId);
     db.appendAuditLog({
       actorUserId: user?.id || null,
       action: `integration.${providerId}.oauth_connected`,
       resourceType: "integration",
       resourceId: providerId,
+      metadata: dashboardId ? { dashboardId } : null,
     });
-    broadcastSSE({ type: "data", changed: ["integrations"] });
+    broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user?.id);
     sendRawHtml(res, oauthResultHtml({ providerId, ok: true, connectedAccount: result.connectedAccount }));
   } catch (error) {
     logger.error("OAuth callback failed", { provider: providerId, error: error.message });
@@ -432,32 +494,40 @@ async function handlePerfectPaySubmit(req, res) {
   const { body: fields, raw } = body || {};
   const provider = providers.get("perfectpay");
   const token = String(fields?.token || "").trim();
+  let dashboardId = String(fields?.dashboard_id || "").trim();
   const user = token ? db.getUserByToken(token) : null;
   if (!user) {
     sendRawHtml(res, oauthResultHtml({ providerId: "perfectpay", ok: false, error: "Sessão expirada. Reabra a página de conexões e tente novamente." }));
     return;
   }
+  if (dashboardId) {
+    const dash = db.getDashboard(dashboardId);
+    if (!dash || String(dash.owner_id) !== String(user.id)) {
+      dashboardId = "";
+    }
+  }
   if (!fields?.email || !fields?.password) {
-    sendRawHtml(res, renderPerfectPayForm({ token, error: "Preencha e-mail e senha para continuar." }));
+    sendRawHtml(res, renderPerfectPayForm({ token, dashboardId, error: "Preencha e-mail e senha para continuar." }));
     return;
   }
   try {
     const result = await provider.handleAuth({ email: String(fields.email).trim(), password: String(fields.password) });
-    const existing = db.getIntegration("perfectpay");
+    const existing = db.getIntegration("perfectpay", dashboardId);
     storeConnection("perfectpay", {
       accessToken: encryptSecret(result.accessToken),
       connectedAccount: result.connectedAccount || null,
       apiStatus: "connected",
       retryStatus: "idle",
       webhookUrl: existing.webhookUrl || null,
-    });
+    }, dashboardId);
     db.appendAuditLog({
       actorUserId: user.id,
       action: "integration.perfectpay.connected",
       resourceType: "integration",
       resourceId: "perfectpay",
+      metadata: dashboardId ? { dashboardId } : null,
     });
-    broadcastSSE({ type: "data", changed: ["integrations"] });
+    broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user.id);
     sendRawHtml(res, oauthResultHtml({ providerId: "perfectpay", ok: true, connectedAccount: result.connectedAccount }));
   } catch (error) {
     logger.error("Perfect Pay connect failed", { error: error.message });
@@ -475,8 +545,8 @@ async function handlePerfectPaySubmit(req, res) {
 
 const SECRET_FIELDS = new Set(["accessToken", "webhookSecret", "access_token", "webhook_secret"]);
 
-function publicIntegration(provider) {
-  const data = db.getIntegration(provider.id);
+function publicIntegration(provider, dashboardId) {
+  const data = db.getIntegration(provider.id, dashboardId);
   const health = provider.health();
   const safe = {};
   for (const [key, value] of Object.entries(data)) {
@@ -499,13 +569,13 @@ function publicIntegration(provider) {
   };
 }
 
-function listPublicIntegrations() {
-  return providers.list().map((provider) => publicIntegration(provider));
+function listPublicIntegrations(dashboardId) {
+  return providers.list().map((provider) => publicIntegration(provider, dashboardId));
 }
 
-async function handleMetaSync(req, res, user) {
+async function handleMetaSync(req, res, user, dashboardId) {
   const provider = providers.get("meta");
-  const integration = db.getIntegration("meta");
+  const integration = db.getIntegration("meta", dashboardId);
   const token = integration?.accessToken ? decryptSecret(integration.accessToken) : null;
   if (!token) {
     send(res, 400, { ok: false, error: "Meta Ads não está conectado. Conecte sua conta do Facebook primeiro." }, {}, req);
@@ -556,21 +626,23 @@ async function handleMetaSync(req, res, user) {
       for (const row of daily) {
         if (!row.date) continue;
         if (row.spendCents > 0) {
-          db.run("DELETE FROM advertising_spend WHERE source = 'meta' AND substr(created_at, 1, 10) = ?", [row.date]);
+          db.run("DELETE FROM advertising_spend WHERE source = 'meta' AND dashboard_id = ? AND substr(created_at, 1, 10) = ?", [dashboardId, row.date]);
           db.insertSpend({
             id: `meta-sp-${row.date}`,
             source: "meta",
             amountCents: row.spendCents,
             currency: selected.currency || "BRL",
+            dashboardId,
             createdAt: `${row.date}T00:00:00Z`,
           });
         }
         if (row.clicks > 0) {
-          db.run("DELETE FROM clicks WHERE source = 'meta' AND substr(created_at, 1, 10) = ?", [row.date]);
+          db.run("DELETE FROM clicks WHERE source = 'meta' AND dashboard_id = ? AND substr(created_at, 1, 10) = ?", [dashboardId, row.date]);
           db.insertClick({
             id: `meta-cl-${row.date}`,
             source: "meta",
             quantity: row.clicks,
+            dashboardId,
             createdAt: `${row.date}T00:00:00Z`,
           });
         }
@@ -591,7 +663,7 @@ async function handleMetaSync(req, res, user) {
     lastSyncAt: new Date().toISOString(),
     importsCount: (Number(integration?.importsCount) || 0) + 1,
     errors: [],
-  });
+  }, dashboardId);
   db.insertImportRun({
     type: "meta_sync",
     filename: "Sincronização automática Meta",
@@ -601,6 +673,7 @@ async function handleMetaSync(req, res, user) {
     spendCents: importedSpend,
     clicks: importedClicks,
     campaigns: dateTags.size,
+    dashboardId,
     createdBy: user?.id || null,
   });
   db.appendAuditLog({
@@ -610,22 +683,22 @@ async function handleMetaSync(req, res, user) {
     resourceId: "meta",
     metadata: { account: selected.name, days: dateTags.size },
   });
-  broadcastSSE({ type: "data", changed: ["integrations", "dashboard", "metrics", "funnel", "sales"] });
+  broadcastSSE({ type: "data", changed: ["integrations", "dashboard", "metrics", "funnel", "sales"], dashboardId }, user?.id);
   send(res, 200, { ok: true, account: selected.name, days: dateTags.size, spendCents: importedSpend, clicks: importedClicks }, {}, req);
 }
 
-async function handleIntegrationHealth(req, res, match) {
+async function handleIntegrationHealth(req, res, match, dashboardId) {
   const provider = providers.get(match[1]);
   if (!provider) {
     send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
     return;
   }
   const health = provider.health();
-  const data = db.getIntegration(provider.id);
+  const data = db.getIntegration(provider.id, dashboardId);
   send(res, 200, { ok: true, provider: provider.id, ...health, connected: data.status === "connected" || data.connected === true || data.apiStatus === "connected" }, {}, req);
 }
 
-async function handleIntegrationUpdate(req, res, match, user) {
+async function handleIntegrationUpdate(req, res, match, user, dashboardId) {
   const provider = providers.get(match[1]);
   if (!provider) {
     send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
@@ -638,7 +711,7 @@ async function handleIntegrationUpdate(req, res, match, user) {
     send(res, 400, { ok: false, error: error.message }, {}, req);
     return;
   }
-  const current = db.getIntegration(provider.id);
+  const current = db.getIntegration(provider.id, dashboardId);
   const allowed = new Set(provider.writableFields || []);
   for (const [key, value] of Object.entries(body || {})) {
     if (!allowed.has(key)) continue;
@@ -649,7 +722,7 @@ async function handleIntegrationUpdate(req, res, match, user) {
     }
   }
   if (body?.webhookUrl !== undefined) current.webhookUrl = String(body.webhookUrl || "").trim();
-  db.upsertIntegration(provider.id, current);
+  db.upsertIntegration(provider.id, current, dashboardId);
   db.appendAuditLog({
     actorUserId: user.id,
     action: `integration.${provider.id}.update`,
@@ -657,13 +730,13 @@ async function handleIntegrationUpdate(req, res, match, user) {
     resourceId: provider.id,
     metadata: { fields: Object.keys(body || {}).filter((key) => allowed.has(key)) },
   });
-  broadcastSSE({ type: "data", changed: ["integrations"] });
+  broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user.id);
   send(res, 200, { ok: true, item: publicIntegration(provider) }, {}, req);
 }
 
 /* ------------------------------------------------------------- Import CSV */
 
-async function handleImportCsv(req, res, user) {
+async function handleImportCsv(req, res, user, dashboardId) {
   const contentType = String(req.headers["content-type"] || "").toLowerCase();
   if (!contentType.includes("multipart/form-data")) {
     send(res, 400, { ok: false, error: "Envie o arquivo como multipart/form-data." }, {}, req);
@@ -712,15 +785,15 @@ async function handleImportCsv(req, res, user) {
       let clicksCommitted = 0;
       let salesCommitted = 0;
       for (const record of result.spendRecords) {
-        db.insertSpend(record);
+        db.insertSpend({ ...record, dashboardId });
         spendCommitted++;
       }
       for (const record of result.clicksRecords) {
-        db.insertClick(record);
+        db.insertClick({ ...record, dashboardId });
         clicksCommitted++;
       }
       for (const record of result.salesRecords || []) {
-        db.insertSale(record);
+        db.insertSale({ ...record, dashboardId });
         salesCommitted++;
       }
       const commissionSummary = {
@@ -746,6 +819,7 @@ async function handleImportCsv(req, res, user) {
         campaigns: result.campaigns.length,
         preview: commissionSummary,
         status: "completed",
+        dashboardId,
         createdBy: user.id,
       });
       return { ...commissionSummary, salesCommitted };
@@ -771,7 +845,7 @@ async function handleImportCsv(req, res, user) {
     metadata: { totalRows: result.totalRows, spendCents: commits.totalSpendCents, campaigns: commits.campaigns.length },
   });
   const now = new Date().toISOString();
-  const metaIntegration = db.getIntegration("meta");
+  const metaIntegration = db.getIntegration("meta", dashboardId);
   db.upsertIntegration("meta", {
     ...metaIntegration,
     status: "connected",
@@ -780,13 +854,13 @@ async function handleImportCsv(req, res, user) {
     importsCount: (metaIntegration.importsCount || 0) + 1,
     lastImportId: result.importId,
     errors: [],
-  });
-  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "metrics", "logs", "integrations"] });
+  }, dashboardId);
+  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "metrics", "logs", "integrations"], dashboardId }, user.id);
   send(res, 200, { ok: true, importId: result.importId, stats: commits }, {}, req);
 }
 
-async function handleListImportRuns(req, res) {
-  send(res, 200, { ok: true, items: db.listImportRuns(20) }, {}, req);
+async function handleListImportRuns(req, res, dashboardId) {
+  send(res, 200, { ok: true, items: db.listImportRuns(20, dashboardId) }, {}, req);
 }
 
 /* ------------------------------------------------------------- Auth */
@@ -865,8 +939,8 @@ async function handleAuthRegister(req, res) {
     send(res, 400, { ok: false, error: "Informe um e-mail válido" }, {}, req);
     return;
   }
-  if (password.length < 6) {
-    send(res, 400, { ok: false, error: "A senha deve ter pelo menos 6 caracteres" }, {}, req);
+  if (password.length < 8) {
+    send(res, 400, { ok: false, error: "A senha deve ter pelo menos 8 caracteres" }, {}, req);
     return;
   }
   if (db.getUserByEmail(email)) {
@@ -875,6 +949,7 @@ async function handleAuthRegister(req, res) {
   }
   const userCount = db.get("SELECT COUNT(*) AS n FROM users").n;
   const user = db.createUser({ name, email, role: userCount === 0 ? "admin" : "member", password });
+  db.ensureDefaultDashboard(user.id);
   db.pruneExpiredSessions();
   const session = db.createSession(user.id);
   db.appendAuditLog({ actorUserId: user.id, action: "auth.register", resourceType: "user", resourceId: user.id });
@@ -933,24 +1008,51 @@ async function handlePerfectPayWebhook(req, res) {
     return;
   }
 
-  const integration = db.getIntegration("perfectpay");
-  const secret = integration.webhookSecret ? decryptSecret(integration.webhookSecret) : (integration.webhookSecret || "");
   const provider = providers.get("perfectpay");
+  const event = provider.normalizeWebhookEvent(body);
+
+  let dashboardId = "";
+  const dashboardsWithPp = db.listDashboardsWithIntegration("perfectpay");
+  const connectedOnes = dashboardsWithPp.filter((entry) => {
+    const data = db.getIntegration("perfectpay", entry.dashboardId);
+    return data.status === "connected" || data.connected === true || data.apiStatus === "connected";
+  });
+
+  if (event.trackroiClickId) {
+    dashboardId = db.findClickDashboardByTrackroiId(event.trackroiClickId) || "";
+  }
+  if (!dashboardId && connectedOnes.length === 1) {
+    dashboardId = connectedOnes[0].dashboardId;
+  }
+  if (!dashboardId) {
+    db.appendAuditLog({
+      action: "webhook.unknown_dashboard",
+      resourceType: "webhook_event",
+      resourceId: db.makeId("we"),
+      metadata: { reason: "no_tenant_resolved", transactionId: event.transactionId || null },
+    });
+    send(res, 400, { ok: false, error: "No tenant resolved for this webhook. Configure the integration in the dashboard first." }, {}, req);
+    return;
+  }
+
+  const dashOwner = connectedOnes.find((entry) => entry.dashboardId === dashboardId) || dashboardsWithPp.find((entry) => entry.dashboardId === dashboardId);
+  const integration = db.getIntegration("perfectpay", dashboardId);
+  const secret = integration.webhookSecret ? decryptSecret(integration.webhookSecret) : (integration.webhookSecret || "");
   if (secret) {
     const valid = provider.verifyWebhookSignature(raw, req.headers, secret);
     if (!valid) {
       db.appendAuditLog({
+        actorUserId: dashOwner?.owner_id || null,
         action: "webhook.invalid_signature",
         resourceType: "webhook_event",
         resourceId: db.makeId("we"),
-        metadata: { reason: "signature_mismatch" },
+        metadata: { reason: "signature_mismatch", dashboardId },
       });
       send(res, 401, { ok: false, error: "Invalid signature" }, {}, req);
       return;
     }
   }
 
-  const event = provider.normalizeWebhookEvent(body);
   const supportedEvents = new Set(["approved", "pending", "refunded", "chargeback", "cancelled", "rejected"]);
   if (!event.transactionId || !event.eventType) {
     send(res, 400, { ok: false, error: "transaction_id and event_type are required" }, {}, req);
@@ -961,7 +1063,7 @@ async function handlePerfectPayWebhook(req, res) {
     return;
   }
 
-  const idempotencyKey = `perfectpay:${event.transactionId}:${event.eventType}`;
+  const idempotencyKey = `perfectpay:${event.transactionId}:${event.eventType}:${dashboardId}`;
   const receivedAt = new Date().toISOString();
   const inserted = db.insertWebhookEvent({
     id: db.makeId("we"),
@@ -971,6 +1073,7 @@ async function handlePerfectPayWebhook(req, res) {
     idempotencyKey,
     receivedAt,
     status: "received",
+    dashboardId,
     rawPayload: body,
   });
   if (!inserted) {
@@ -988,25 +1091,28 @@ async function handlePerfectPayWebhook(req, res) {
     currency: event.currency,
     trackroiClickId: event.trackroiClickId,
     source,
+    dashboardId,
     createdAt: receivedAt,
     updatedAt: receivedAt,
   });
-  db.updateIntegrationField("perfectpay", "lastReceivedEventAt", receivedAt);
+  db.updateIntegrationField("perfectpay", "lastReceivedEventAt", receivedAt, dashboardId);
   db.appendAuditLog({
+    actorUserId: dashOwner?.owner_id || null,
     action: "webhook.received",
     resourceType: "webhook_event",
     resourceId: db.makeId("we"),
-    metadata: { eventType: event.eventType, transactionId: event.transactionId, duplicate: false },
+    metadata: { eventType: event.eventType, transactionId: event.transactionId, duplicate: false, dashboardId },
   });
   if (event.eventType === "approved") {
     db.appendAuditLog({
+      actorUserId: dashOwner?.owner_id || null,
       action: "sale.approved",
       resourceType: "sale",
       resourceId: db.makeId("sa"),
       metadata: { amountCents: event.amountCents, currency: event.currency },
     });
   }
-  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "logs", "integrations"] });
+  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "logs", "integrations"], dashboardId }, dashOwner?.owner_id || null);
   send(res, 200, { ok: true, duplicate: false, idempotency_key: idempotencyKey, sale_status: event.eventType }, {}, req);
 }
 
@@ -1142,71 +1248,80 @@ async function main() {
       if (req.method === "GET") {
         const healthMatch = pathname.match(/^\/api\/integrations\/([a-z]+)\/health$/);
         if (healthMatch) {
-          await handleIntegrationHealth(req, res, healthMatch);
+          const dashboardId = resolveDashboardId(auth, req);
+          await handleIntegrationHealth(req, res, healthMatch, dashboardId);
           return;
         }
       }
 
       if (req.method === "GET" && pathname === "/api/dashboard") {
+        const dashboardId = resolveDashboardId(auth, req);
         const period = resolvePeriod(query);
         const source = String(query.source || "all").toLowerCase();
-        const aggregates = db.dashboardAggregates(source, period);
-        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance });
-        dashboard.trend = db.dailyTrend(source, period);
+        const aggregates = db.dashboardAggregates(source, period, dashboardId);
+        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings(dashboardId).finance });
+        dashboard.trend = db.dailyTrend(source, period, dashboardId);
         send(res, 200, dashboard, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/metrics") {
+        const dashboardId = resolveDashboardId(auth, req);
         const period = resolvePeriod(query);
         const source = String(query.source || "all").toLowerCase();
-        const aggregates = db.dashboardAggregates(source, period);
-        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings().finance });
+        const aggregates = db.dashboardAggregates(source, period, dashboardId);
+        const dashboard = buildDashboardFromAggregates({ aggregates, source, period, finance: db.getSettings(dashboardId).finance });
         send(res, 200, { ok: true, metrics: dashboard.summary, cards: dashboard.cards, funnel: dashboard.funnel }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/sales") {
-        const total = db.countSales();
-        const rows = db.listSales(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50));
+        const dashboardId = resolveDashboardId(auth, req);
+        const total = db.countSales(dashboardId);
+        const rows = db.listSales(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50), dashboardId);
         send(res, 200, { ok: true, ...paginateSql(total, rows, query) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/clicks") {
-        const total = db.countClicks();
-        const rows = db.listClicks(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50));
+        const dashboardId = resolveDashboardId(auth, req);
+        const total = db.countClicks(dashboardId);
+        const rows = db.listClicks(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50), dashboardId);
         send(res, 200, { ok: true, ...paginateSql(total, rows, query) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/checkouts") {
-        const total = db.countCheckouts();
-        const rows = db.listCheckouts(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50));
+        const dashboardId = resolveDashboardId(auth, req);
+        const total = db.countCheckouts(dashboardId);
+        const rows = db.listCheckouts(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50), dashboardId);
         send(res, 200, { ok: true, ...paginateSql(total, rows, query) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/webhook-events") {
-        const total = db.countWebhookEvents();
-        const rows = db.listWebhookEvents(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50));
+        const dashboardId = resolveDashboardId(auth, req);
+        const total = db.countWebhookEvents(dashboardId);
+        const rows = db.listWebhookEvents(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50), dashboardId);
         send(res, 200, { ok: true, ...paginateSql(total, rows, query) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/audit-logs") {
-        const total = db.countAuditLogs();
-        const rows = db.listAuditLogs(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50));
+        const total = db.countAuditLogs(auth.user.id);
+        const rows = db.listAuditLogs(Math.min(100, Number(query.limit) || 50), Math.max(0, (Number(query.page) || 1) - 1) * (Number(query.limit) || 50), auth.user.id);
         send(res, 200, { ok: true, ...paginateSql(total, rows, query) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/products") {
-        send(res, 200, { ok: true, items: db.listProducts() }, {}, req);
+        const dashboardId = resolveDashboardId(auth, req);
+        send(res, 200, { ok: true, items: db.listProducts(dashboardId) }, {}, req);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/products") {
+        const dashboardId = resolveDashboardId(auth, req);
         let body;
         try {
           body = await parseBody(req);
@@ -1219,19 +1334,21 @@ async function main() {
           send(res, 400, { ok: false, error: "name is required" }, {}, req);
           return;
         }
-        const product = db.createProduct({ name, priceCents: Math.round(Number(body?.priceCents || 0)) });
+        const product = db.createProduct({ dashboardId, name, priceCents: Math.round(Number(body?.priceCents || 0)) });
         db.appendAuditLog({ actorUserId: auth.user.id, action: "product.create", resourceType: "product", resourceId: product.id });
-        broadcastSSE({ type: "data", changed: ["products"] });
+        broadcastSSE({ type: "data", changed: ["products"], dashboardId }, auth.user.id);
         send(res, 201, { ok: true, item: product }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/settings") {
-        send(res, 200, { ok: true, settings: db.getSettings() }, {}, req);
+        const dashboardId = resolveDashboardId(auth, req);
+        send(res, 200, { ok: true, settings: db.getSettings(dashboardId) }, {}, req);
         return;
       }
 
       if (req.method === "PUT" && pathname === "/api/settings") {
+        const dashboardId = resolveDashboardId(auth, req);
         let body;
         try {
           body = await parseBody(req);
@@ -1239,7 +1356,7 @@ async function main() {
           send(res, 400, { ok: false, error: error.message }, {}, req);
           return;
         }
-        const current = db.getSettings();
+        const current = db.getSettings(dashboardId);
         db.setSettings({
           ...current,
           ...(body || {}),
@@ -1247,25 +1364,28 @@ async function main() {
           appearance: { ...(current.appearance || {}), ...((body || {}).appearance || {}) },
           dashboard: { ...(current.dashboard || {}), ...((body || {}).dashboard || {}) },
           finance: { ...(current.finance || {}), ...((body || {}).finance || {}) },
-        });
+        }, dashboardId);
         db.appendAuditLog({ actorUserId: auth.user.id, action: "settings.update", resourceType: "settings", resourceId: "global" });
-        broadcastSSE({ type: "data", changed: ["settings"] });
-        send(res, 200, { ok: true, settings: db.getSettings() }, {}, req);
+        broadcastSSE({ type: "data", changed: ["settings"], dashboardId }, auth.user.id);
+        send(res, 200, { ok: true, settings: db.getSettings(dashboardId) }, {}, req);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/integrations") {
-        send(res, 200, { ok: true, items: listPublicIntegrations() }, {}, req);
+        const dashboardId = resolveDashboardId(auth, req);
+        send(res, 200, { ok: true, items: listPublicIntegrations(dashboardId) }, {}, req);
         return;
       }
 
       const integrationUpdateMatch = pathname.match(/^\/api\/integrations\/([a-z]+)$/);
       if (req.method === "PUT" && integrationUpdateMatch) {
-        await handleIntegrationUpdate(req, res, integrationUpdateMatch, auth.user);
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleIntegrationUpdate(req, res, integrationUpdateMatch, auth.user, dashboardId);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/dev/click") {
+        const dashboardId = resolveDashboardId(auth, req);
         let body;
         try {
           body = await parseBody(req);
@@ -1274,6 +1394,7 @@ async function main() {
           return;
         }
         const click = db.createClick({
+          dashboardId,
           trackroiClickId: String(body?.trackroi_click_id || "").trim() || undefined,
           source: String(body?.source || "direct"),
           campaignId: body?.campaign_id || body?.campaignId || null,
@@ -1284,12 +1405,13 @@ async function main() {
           fbclid: body?.fbclid || null,
         });
         db.appendAuditLog({ actorUserId: auth.user.id, action: "click.create", resourceType: "click", resourceId: click.id });
-        broadcastSSE({ type: "data", changed: ["dashboard", "funnel", "clicks"] });
+        broadcastSSE({ type: "data", changed: ["dashboard", "funnel", "clicks"], dashboardId }, auth.user.id);
         send(res, 201, { ok: true, item: click }, {}, req);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/dev/checkout") {
+        const dashboardId = resolveDashboardId(auth, req);
         let body;
         try {
           body = await parseBody(req);
@@ -1298,16 +1420,18 @@ async function main() {
           return;
         }
         const checkout = db.createCheckout({
+          dashboardId,
           trackroiClickId: String(body?.trackroi_click_id || "").trim(),
           status: String(body?.status || "initiated"),
         });
         db.appendAuditLog({ actorUserId: auth.user.id, action: "checkout.create", resourceType: "checkout", resourceId: checkout.id });
-        broadcastSSE({ type: "data", changed: ["dashboard", "funnel", "checkouts"] });
+        broadcastSSE({ type: "data", changed: ["dashboard", "funnel", "checkouts"], dashboardId }, auth.user.id);
         send(res, 201, { ok: true, item: checkout }, {}, req);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/dev/spend") {
+        const dashboardId = resolveDashboardId(auth, req);
         let body;
         try {
           body = await parseBody(req);
@@ -1316,28 +1440,32 @@ async function main() {
           return;
         }
         const spend = db.createSpend({
+          dashboardId,
           source: String(body?.source || "meta"),
           amountCents: Math.round(Number(body?.amountCents ?? body?.amount_cents ?? 0)),
           currency: String(body?.currency || "BRL"),
         });
         db.appendAuditLog({ actorUserId: auth.user.id, action: "spend.create", resourceType: "spend", resourceId: spend.id });
-        broadcastSSE({ type: "data", changed: ["dashboard", "metrics", "funnel"] });
+        broadcastSSE({ type: "data", changed: ["dashboard", "metrics", "funnel"], dashboardId }, auth.user.id);
         send(res, 201, { ok: true, item: spend }, {}, req);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/import/csv") {
-        await handleImportCsv(req, res, auth.user);
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleImportCsv(req, res, auth.user, dashboardId);
         return;
       }
 
       if (req.method === "GET" && pathname === "/api/imports") {
-        await handleListImportRuns(req, res);
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleListImportRuns(req, res, dashboardId);
         return;
       }
 
       if (req.method === "POST" && pathname === "/api/integrations/meta/sync") {
-        await handleMetaSync(req, res, auth.user);
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleMetaSync(req, res, auth.user, dashboardId);
         return;
       }
 

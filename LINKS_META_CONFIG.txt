@@ -1,0 +1,26 @@
+=== LINKS ÚTEIS - CONFIGURAÇÃO META APP (TRACKROI) ===
+
+DOMÍNIO DO RAILWAY (PRODUÇÃO):
+  https://trackroi-production.up.railway.app/
+
+PAINEL DO APP META:
+  https://developers.facebook.com/apps/1033357322852273/
+
+CONFIGURAÇÕES BÁSICAS (Domínios):
+  https://developers.facebook.com/apps/1033357322852273/settings/basic/
+
+FACEBOOK LOGIN - OAuth Redirect URIs:
+  https://developers.facebook.com/apps/1033357322852273/fb-login/settings/
+
+  URIs para adicionar:
+    http://localhost:4100/api/integrations/connect/meta/callback
+    https://trackroi-production.up.railway.app/api/integrations/connect/meta/callback
+
+PERMISSÕES DA API (Graph API Explorer):
+  https://developers.facebook.com/tools/explorer/?app_id=1033357322852273
+
+DOCUMENTAÇÃO OAUTH DA META:
+  https://developers.facebook.com/docs/facebook-login/guides/overview
+
+RAILWAY DASHBOARD:
+  https://railway.app/dashboard

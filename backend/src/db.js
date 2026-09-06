@@ -18,6 +18,7 @@ function open() {
   migrateSchema();
   migrateStateJson();
   seedAdminIfNeeded();
+  ensureMultiDashboard();
   return db;
 }
 
@@ -219,6 +220,124 @@ function migrateSchema() {
   if (!saleColumns.includes("quantity")) {
     exec("ALTER TABLE sales ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1");
   }
+  migrateDashboardSchema();
+}
+
+function migrateDashboardSchema() {
+  exec(
+    `CREATE TABLE IF NOT EXISTS dashboards (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`
+  );
+  exec("CREATE INDEX IF NOT EXISTS idx_dashboards_owner ON dashboards(owner_id)");
+
+  const ensureColumn = (tableName) => {
+    const cols = checkDb().prepare(`PRAGMA table_info(${tableName})`).all().map((c) => c.name);
+    if (!cols.includes("dashboard_id")) {
+      exec(`ALTER TABLE ${tableName} ADD COLUMN dashboard_id TEXT NOT NULL DEFAULT ''`);
+    }
+  };
+
+  for (const table of ["clicks", "checkouts", "sales", "webhook_events", "advertising_spend", "import_runs", "products"]) {
+    ensureColumn(table);
+  }
+
+  const integrationCols = checkDb().prepare("PRAGMA table_info(integrations)").all().map((c) => c.name);
+  if (!integrationCols.includes("dashboard_id")) {
+    exec(
+      `CREATE TABLE integrations_v2 (
+        provider_id TEXT NOT NULL,
+        dashboard_id TEXT NOT NULL DEFAULT '',
+        data TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (dashboard_id, provider_id)
+      )`
+    );
+    exec(
+      `INSERT INTO integrations_v2 (provider_id, dashboard_id, data, updated_at)
+       SELECT provider_id, '', data, updated_at FROM integrations`
+    );
+    exec("DROP TABLE integrations");
+    exec("ALTER TABLE integrations_v2 RENAME TO integrations");
+  }
+}
+
+function ensureMultiDashboard() {
+  const flags = { wipeDone: !!get("SELECT 1 FROM settings WHERE key = 'migration_dashboard_v1'") };
+  const dashCount = get("SELECT COUNT(*) AS n FROM dashboards").n;
+  if (dashCount > 0) return flags;
+
+  const users = all("SELECT id FROM users");
+  for (const user of users) {
+    const defaultDash = createDashboard({ ownerId: user.id, name: "Operação Principal" });
+    run("UPDATE integrations SET dashboard_id = ? WHERE dashboard_id = ''", [defaultDash.id]);
+  }
+
+  if (users.length > 0) {
+    exec("DELETE FROM advertising_spend");
+    exec("DELETE FROM clicks");
+    exec("DELETE FROM checkouts");
+    exec("DELETE FROM sales");
+    exec("DELETE FROM webhook_events");
+    exec("DELETE FROM products");
+    exec("DELETE FROM import_runs");
+  }
+
+  run("INSERT INTO settings (key, value) VALUES ('migration_dashboard_v1', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  flags.wipeDone = true;
+  return flags;
+}
+
+/* ------------------------------------------------------------- Dashboards */
+
+function listDashboards(ownerId) {
+  return all("SELECT * FROM dashboards WHERE owner_id = ? ORDER BY created_at ASC", [String(ownerId || "")]).map(mapDashboard);
+}
+
+function getDashboard(id) {
+  return get("SELECT * FROM dashboards WHERE id = ?", [String(id || "")]);
+}
+
+function countDashboards(ownerId) {
+  return get("SELECT COUNT(*) AS n FROM dashboards WHERE owner_id = ?", [String(ownerId || "")]).n;
+}
+
+function createDashboard({ ownerId, name }) {
+  const row = {
+    id: `dash_${crypto.randomUUID()}`,
+    ownerId: String(ownerId || ""),
+    name: String(name || "").trim() || "Nova operação",
+    createdAt: new Date().toISOString(),
+  };
+  run("INSERT INTO dashboards (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)", [
+    row.id,
+    row.ownerId,
+    row.name,
+    row.createdAt,
+  ]);
+  return getDashboard(row.id);
+}
+
+function ensureDefaultDashboard(ownerId) {
+  const owned = listDashboards(ownerId);
+  if (owned.length > 0) return owned[0];
+  return createDashboard({ ownerId, name: "Operação Principal" });
+}
+
+function mapDashboard(row) {
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    name: row.name,
+    createdAt: row.created_at,
+  };
+}
+
+function dashboardClause(dashboardId) {
+  return { sql: " AND dashboard_id = ?", params: [String(dashboardId || "").trim()] };
 }
 
 function migrateStateJson() {
@@ -342,7 +461,7 @@ function pruneExpiredSessions() {
 function insertClick(click) {
   const created = click.createdAt || click.created_at || new Date().toISOString();
   run(
-    "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO clicks (id, trackroi_click_id, source, campaign_id, adset_id, ad_id, landing_page, referrer, fbclid, quantity, dashboard_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       click.id,
       (click.trackroiClickId ?? click.trackroi_click_id) ?? null,
@@ -354,12 +473,13 @@ function insertClick(click) {
       click.referrer ?? null,
       click.fbclid ?? null,
       Number.isFinite(Number(click.quantity)) && Number(click.quantity) > 0 ? Math.round(Number(click.quantity)) : 1,
+      String(click.dashboardId ?? click.dashboard_id ?? "").trim(),
       created,
     ]
   );
 }
 
-function createClick({ trackroiClickId, source, campaignId, adsetId, adId, landingPage, referrer, fbclid }) {
+function createClick({ dashboardId, trackroiClickId, source, campaignId, adsetId, adId, landingPage, referrer, fbclid }) {
   const click = {
     id: makeId("cl"),
     trackroiClickId: trackroiClickId || makeId("trk"),
@@ -370,14 +490,16 @@ function createClick({ trackroiClickId, source, campaignId, adsetId, adId, landi
     landingPage: landingPage || "/",
     referrer: referrer || null,
     fbclid: fbclid || null,
+    dashboardId: String(dashboardId || "").trim(),
     createdAt: new Date().toISOString(),
   };
   insertClick(click);
   return { ...click, id: click.id };
 }
 
-function listClicks(limit, offset) {
-  return all("SELECT * FROM clicks ORDER BY created_at DESC LIMIT ? OFFSET ?", [limit, offset]).map(mapClick);
+function listClicks(limit, offset, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM clicks WHERE 1=1${dc.sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...dc.params, limit, offset]).map(mapClick);
 }
 
 function mapClick(row) {
@@ -392,42 +514,53 @@ function mapClick(row) {
     referrer: row.referrer,
     fbclid: row.fbclid,
     quantity: row.quantity || 1,
+    dashboardId: row.dashboard_id || "",
     createdAt: row.created_at,
   };
 }
 
-function countClicks() {
-  return get("SELECT COUNT(*) AS n FROM clicks").n;
+function countClicks(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT COUNT(*) AS n FROM clicks WHERE 1=1${dc.sql}`, dc.params).n;
 }
 
-function findClickByTrackroiId(trackroiClickId) {
-  return get("SELECT * FROM clicks WHERE trackroi_click_id = ?", [trackroiClickId]);
+function findClickByTrackroiId(trackroiClickId, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT * FROM clicks WHERE trackroi_click_id = ?${dc.sql}`, [trackroiClickId, ...dc.params]);
+}
+
+function findClickDashboardByTrackroiId(trackroiClickId) {
+  const row = get("SELECT dashboard_id FROM clicks WHERE trackroi_click_id = ? LIMIT 1", [String(trackroiClickId || "")]);
+  return row ? String(row.dashboard_id || "").trim() : null;
 }
 
 /* ------------------------------------------------------------- Checkouts */
 
 function insertCheckout(checkout) {
-  run("INSERT OR IGNORE INTO checkouts (id, trackroi_click_id, status, created_at) VALUES (?, ?, ?, ?)", [
+  run("INSERT OR IGNORE INTO checkouts (id, trackroi_click_id, status, dashboard_id, created_at) VALUES (?, ?, ?, ?, ?)", [
     checkout.id,
     (checkout.trackroiClickId ?? checkout.trackroi_click_id) ?? null,
     checkout.status || "initiated",
+    String(checkout.dashboardId ?? checkout.dashboard_id ?? "").trim(),
     checkout.createdAt || checkout.created_at || new Date().toISOString(),
   ]);
 }
 
-function createCheckout({ trackroiClickId, status }) {
+function createCheckout({ dashboardId, trackroiClickId, status }) {
   const checkout = {
     id: makeId("co"),
     trackroiClickId: trackroiClickId || "",
     status: status || "initiated",
+    dashboardId: String(dashboardId || "").trim(),
     createdAt: new Date().toISOString(),
   };
   insertCheckout(checkout);
   return { ...checkout, id: checkout.id };
 }
 
-function listCheckouts(limit, offset) {
-  return all("SELECT * FROM checkouts ORDER BY created_at DESC LIMIT ? OFFSET ?", [limit, offset]).map(mapCheckout);
+function listCheckouts(limit, offset, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM checkouts WHERE 1=1${dc.sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...dc.params, limit, offset]).map(mapCheckout);
 }
 
 function mapCheckout(row) {
@@ -435,19 +568,21 @@ function mapCheckout(row) {
     id: row.id,
     trackroiClickId: row.trackroi_click_id,
     status: row.status,
+    dashboardId: row.dashboard_id || "",
     createdAt: row.created_at,
   };
 }
 
-function countCheckouts() {
-  return get("SELECT COUNT(*) AS n FROM checkouts").n;
+function countCheckouts(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT COUNT(*) AS n FROM checkouts WHERE 1=1${dc.sql}`, dc.params).n;
 }
 
 /* ------------------------------------------------------------- Sales */
 
 function insertSale(sale) {
   run(
-    "INSERT OR IGNORE INTO sales (id, gateway, gateway_transaction_id, event_type, status, amount_cents, currency, trackroi_click_id, source, quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO sales (id, gateway, gateway_transaction_id, event_type, status, amount_cents, currency, trackroi_click_id, source, quantity, dashboard_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       sale.id,
       sale.gateway,
@@ -459,6 +594,7 @@ function insertSale(sale) {
       (sale.trackroiClickId ?? sale.trackroi_click_id) ?? null,
       sale.source,
       Number.isFinite(Number(sale.quantity)) && Number(sale.quantity) > 0 ? Math.round(Number(sale.quantity)) : 1,
+      String(sale.dashboardId ?? sale.dashboard_id ?? "").trim(),
       sale.createdAt || sale.created_at || new Date().toISOString(),
       sale.updatedAt || sale.updated_at || new Date().toISOString(),
     ]
@@ -469,7 +605,7 @@ function upsertSale(sale) {
   insertSale(sale);
   run(
     `UPDATE sales SET event_type = ?, status = ?, amount_cents = ?, currency = ?, trackroi_click_id = ?, source = ?, updated_at = ?
-     WHERE gateway = ? AND gateway_transaction_id = ?`,
+     WHERE gateway = ? AND gateway_transaction_id = ? AND dashboard_id = ?`,
     [
       sale.eventType || sale.event_type,
       sale.status,
@@ -480,16 +616,19 @@ function upsertSale(sale) {
       sale.updatedAt || sale.updated_at || new Date().toISOString(),
       sale.gateway,
       sale.gatewayTransactionId || sale.gateway_transaction_id,
+      String(sale.dashboardId ?? sale.dashboard_id ?? "").trim(),
     ]
   );
 }
 
-function findSaleByTx(gateway, txId) {
-  return get("SELECT * FROM sales WHERE gateway = ? AND gateway_transaction_id = ?", [gateway, txId]);
+function findSaleByTx(gateway, txId, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT * FROM sales WHERE gateway = ? AND gateway_transaction_id = ?${dc.sql}`, [gateway, txId, ...dc.params]);
 }
 
-function listSales(limit, offset) {
-  return all("SELECT * FROM sales ORDER BY created_at DESC LIMIT ? OFFSET ?", [limit, offset]).map(mapSale);
+function listSales(limit, offset, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM sales WHERE 1=1${dc.sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...dc.params, limit, offset]).map(mapSale);
 }
 
 function mapSale(row) {
@@ -504,19 +643,21 @@ function mapSale(row) {
     trackroiClickId: row.trackroi_click_id,
     source: row.source,
     quantity: row.quantity || 1,
+    dashboardId: row.dashboard_id || "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-function countSales() {
-  return get("SELECT COUNT(*) AS n FROM sales").n;
+function countSales(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT COUNT(*) AS n FROM sales WHERE 1=1${dc.sql}`, dc.params).n;
 }
 
 /* ------------------------------------------------------------- Webhook events */
 
 function insertWebhookEvent(event) {
-  const result = run("INSERT OR IGNORE INTO webhook_events (id, gateway, transaction_id, event_type, idempotency_key, received_at, status, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+  const result = run("INSERT OR IGNORE INTO webhook_events (id, gateway, transaction_id, event_type, idempotency_key, received_at, status, dashboard_id, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
     event.id,
     event.gateway,
     event.transactionId || event.transaction_id,
@@ -524,17 +665,20 @@ function insertWebhookEvent(event) {
     event.idempotencyKey || event.idempotency_key,
     event.receivedAt || event.received_at || new Date().toISOString(),
     event.status || "received",
+    String(event.dashboardId ?? event.dashboard_id ?? "").trim(),
     event.rawPayload ? JSON.stringify(event.rawPayload) : null,
   ]);
   return result.changes > 0;
 }
 
-function hasWebhookEvent(idempotencyKey) {
-  return !!get("SELECT 1 FROM webhook_events WHERE idempotency_key = ?", [idempotencyKey]);
+function hasWebhookEvent(idempotencyKey, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return !!get(`SELECT 1 FROM webhook_events WHERE idempotency_key = ?${dc.sql}`, [idempotencyKey, ...dc.params]);
 }
 
-function listWebhookEvents(limit, offset) {
-  return all("SELECT * FROM webhook_events ORDER BY received_at DESC LIMIT ? OFFSET ?", [limit, offset]).map(mapWebhookEvent);
+function listWebhookEvents(limit, offset, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM webhook_events WHERE 1=1${dc.sql} ORDER BY received_at DESC LIMIT ? OFFSET ?`, [...dc.params, limit, offset]).map(mapWebhookEvent);
 }
 
 function mapWebhookEvent(row) {
@@ -552,32 +696,36 @@ function mapWebhookEvent(row) {
     idempotencyKey: row.idempotency_key,
     receivedAt: row.received_at,
     status: row.status,
+    dashboardId: row.dashboard_id || "",
     rawPayload,
   };
 }
 
-function countWebhookEvents() {
-  return get("SELECT COUNT(*) AS n FROM webhook_events").n;
+function countWebhookEvents(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return get(`SELECT COUNT(*) AS n FROM webhook_events WHERE 1=1${dc.sql}`, dc.params).n;
 }
 
 /* ------------------------------------------------------------- Advertising spend */
 
 function insertSpend(spend) {
-  run("INSERT OR IGNORE INTO advertising_spend (id, source, amount_cents, currency, created_at) VALUES (?, ?, ?, ?, ?)", [
+  run("INSERT OR IGNORE INTO advertising_spend (id, source, amount_cents, currency, dashboard_id, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
     spend.id,
     spend.source,
     spend.amountCents ?? spend.amount_cents ?? 0,
     spend.currency || "BRL",
+    String(spend.dashboardId ?? spend.dashboard_id ?? "").trim(),
     spend.createdAt || spend.created_at || new Date().toISOString(),
   ]);
 }
 
-function createSpend({ source, amountCents, currency }) {
+function createSpend({ dashboardId, source, amountCents, currency }) {
   const spend = {
     id: makeId("sp"),
     source: source || "meta",
     amountCents: Number(amountCents) || 0,
     currency: String(currency || "BRL").toUpperCase(),
+    dashboardId: String(dashboardId || "").trim(),
     createdAt: new Date().toISOString(),
   };
   insertSpend(spend);
@@ -588,8 +736,8 @@ function createSpend({ source, amountCents, currency }) {
 
 function insertImportRun(entry) {
   run(
-    `INSERT INTO import_runs (id, type, filename, total_rows, imported_spend, imported_clicks, spend_cents, clicks, campaigns, preview, status, error, created_at, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO import_runs (id, type, filename, total_rows, imported_spend, imported_clicks, spend_cents, clicks, campaigns, preview, status, error, dashboard_id, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       entry.id || `imp_${crypto.randomUUID()}`,
       entry.type || "meta",
@@ -603,14 +751,16 @@ function insertImportRun(entry) {
       entry.preview ? JSON.stringify(entry.preview) : null,
       entry.status || "completed",
       entry.error || null,
+      String(entry.dashboardId ?? entry.dashboard_id ?? "").trim(),
       entry.createdAt || new Date().toISOString(),
       entry.createdBy || null,
     ]
   );
 }
 
-function listImportRuns(limit = 20) {
-  return all("SELECT * FROM import_runs ORDER BY created_at DESC LIMIT ?", [limit]).map(mapImportRun);
+function listImportRuns(limit = 20, dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM import_runs WHERE 1=1${dc.sql} ORDER BY created_at DESC LIMIT ?`, [...dc.params, limit]).map(mapImportRun);
 }
 
 function mapImportRun(row) {
@@ -633,6 +783,7 @@ function mapImportRun(row) {
     preview,
     status: row.status,
     error: row.error,
+    dashboardId: row.dashboard_id || "",
     createdAt: row.created_at,
     createdBy: row.created_by,
   };
@@ -656,7 +807,10 @@ function appendAuditLog(entry) {
   insertAuditLog(entry);
 }
 
-function listAuditLogs(limit, offset) {
+function listAuditLogs(limit, offset, userId) {
+  if (userId) {
+    return all("SELECT * FROM audit_logs WHERE actor_user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?", [String(userId), limit, offset]).map(mapAuditLog);
+  }
   return all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?", [limit, offset]).map(mapAuditLog);
 }
 
@@ -678,34 +832,40 @@ function mapAuditLog(row) {
   };
 }
 
-function countAuditLogs() {
+function countAuditLogs(userId) {
+  if (userId) {
+    return get("SELECT COUNT(*) AS n FROM audit_logs WHERE actor_user_id = ?", [String(userId)]).n;
+  }
   return get("SELECT COUNT(*) AS n FROM audit_logs").n;
 }
 
 /* ------------------------------------------------------------- Products */
 
-function insertProduct(product) {
-  run("INSERT OR IGNORE INTO products (id, name, price_cents, created_at) VALUES (?, ?, ?, ?)", [
+function insertProduct(product, dashboardId) {
+  run("INSERT OR IGNORE INTO products (id, name, price_cents, dashboard_id, created_at) VALUES (?, ?, ?, ?, ?)", [
     product.id,
     product.name,
     product.priceCents ?? product.price_cents ?? 0,
+    String(dashboardId ?? product.dashboardId ?? product.dashboard_id ?? "").trim(),
     product.createdAt || product.created_at || new Date().toISOString(),
   ]);
 }
 
-function createProduct({ name, priceCents }) {
+function createProduct({ dashboardId, name, priceCents }) {
   const product = {
     id: makeId("pr"),
     name: String(name || "").trim(),
     priceCents: Number(priceCents) || 0,
+    dashboardId: String(dashboardId || "").trim(),
     createdAt: new Date().toISOString(),
   };
-  insertProduct(product);
+  insertProduct(product, dashboardId);
   return { ...product, id: product.id };
 }
 
-function listProducts() {
-  return all("SELECT * FROM products ORDER BY created_at DESC").map(mapProduct);
+function listProducts(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT * FROM products WHERE 1=1${dc.sql} ORDER BY created_at DESC`, dc.params).map(mapProduct);
 }
 
 function mapProduct(row) {
@@ -713,51 +873,65 @@ function mapProduct(row) {
     id: row.id,
     name: row.name,
     priceCents: row.price_cents,
+    dashboardId: row.dashboard_id || "",
     createdAt: row.created_at,
   };
 }
 
 /* ------------------------------------------------------------- Integrations */
 
-function upsertIntegration(providerId, data) {
+function upsertIntegration(providerId, data, dashboardId) {
   run(
-    "INSERT INTO integrations (provider_id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(provider_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
-    [providerId, JSON.stringify(data || {}), new Date().toISOString()]
+    "INSERT INTO integrations (dashboard_id, provider_id, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(dashboard_id, provider_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+    [String(dashboardId || "").trim(), providerId, JSON.stringify(data || {}), new Date().toISOString()]
   );
 }
 
-function getIntegration(providerId) {
-  const row = get("SELECT data, updated_at FROM integrations WHERE provider_id = ?", [providerId]);
+function getIntegration(providerId, dashboardId) {
+  const row = get("SELECT data, updated_at FROM integrations WHERE provider_id = ? AND dashboard_id = ?", [providerId, String(dashboardId || "").trim()]);
   if (!row) return { updated_at: null };
   return { ...JSON.parse(row.data || "{}"), updated_at: row.updated_at };
 }
 
-function listIntegrations() {
-  return all("SELECT provider_id, data, updated_at FROM integrations").map((row) => ({
+function listIntegrations(dashboardId) {
+  const dc = dashboardClause(dashboardId);
+  return all(`SELECT dashboard_id, provider_id, data, updated_at FROM integrations WHERE 1=1${dc.sql} ORDER BY updated_at DESC`, dc.params).map((row) => ({
+    dashboardId: row.dashboard_id || "",
     providerId: row.provider_id,
     ...JSON.parse(row.data || "{}"),
     updated_at: row.updated_at,
   }));
 }
 
-function updateIntegrationField(providerId, field, value) {
-  const current = getIntegration(providerId);
+function listDashboardsWithIntegration(providerId) {
+  return all(
+    "SELECT i.dashboard_id, u.id AS owner_id, u.name AS owner_name FROM integrations i JOIN dashboards d ON d.id = i.dashboard_id JOIN users u ON u.id = d.owner_id WHERE i.provider_id = ? AND i.dashboard_id != ''",
+    [String(providerId)]
+  );
+}
+
+function updateIntegrationField(providerId, field, value, dashboardId) {
+  const current = getIntegration(providerId, dashboardId);
   current[field] = value;
-  upsertIntegration(providerId, current);
+  upsertIntegration(providerId, current, dashboardId);
   return current;
 }
 
 /* ------------------------------------------------------------- Settings */
 
-function setSettings(settings) {
+function settingsKey(dashboardId) {
+  return `dash_${String(dashboardId || "").trim() || "global"}`;
+}
+
+function setSettings(settings, dashboardId) {
   run(
-    "INSERT INTO settings (key, value) VALUES ('app', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    [JSON.stringify(settings || {})]
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [settingsKey(dashboardId), JSON.stringify(settings || {})]
   );
 }
 
-function getSettings() {
-  const row = get("SELECT value FROM settings WHERE key = 'app'");
+function getSettings(dashboardId) {
+  const row = get("SELECT value FROM settings WHERE key = ?", [settingsKey(dashboardId)]);
   if (!row) return {};
   try {
     return JSON.parse(row.value);
@@ -816,7 +990,7 @@ function resetLoginAttempts(ip) {
 }
 
 function isRateLimited(ip, maxAttempts = 5) {
-  if (process.env.ENABLE_LOGIN_RATE_LIMIT !== "true") return false;
+  if (process.env.ENABLE_LOGIN_RATE_LIMIT === "false") return false;
   const row = get("SELECT * FROM login_attempts WHERE ip = ?", [ip]);
   if (!row) return false;
   if (Date.now() - row.first_attempt > 15 * 60 * 1000) {
@@ -840,7 +1014,8 @@ function sourceClause(source) {
   return { sql: " AND source = ?", params: [String(source).toLowerCase()] };
 }
 
-function dailyTrend(source = "all", period = null) {
+function dailyTrend(source = "all", period = null, dashboardId) {
+  const dc = dashboardClause(dashboardId);
   const salesWhere = sourceClause(source);
   const clicksWhere = sourceClause(source);
   const spendWhere = sourceClause(source);
@@ -848,16 +1023,16 @@ function dailyTrend(source = "all", period = null) {
 
   const spendRows = all(
     `SELECT substr(created_at, 1, 10) AS day, COALESCE(SUM(amount_cents), 0) AS amount
-     FROM advertising_spend WHERE 1=1${spendWhere.sql}${pd.sql}
+     FROM advertising_spend WHERE 1=1${dc.sql}${spendWhere.sql}${pd.sql}
      GROUP BY day`,
-    [...spendWhere.params, ...pd.params]
+    [...dc.params, ...spendWhere.params, ...pd.params]
   );
 
   const clickRows = all(
     `SELECT substr(created_at, 1, 10) AS day, COALESCE(SUM(quantity), 0) AS count
-     FROM clicks WHERE 1=1${clicksWhere.sql}${pd.sql}
+     FROM clicks WHERE 1=1${dc.sql}${clicksWhere.sql}${pd.sql}
      GROUP BY day`,
-    [...clicksWhere.params, ...pd.params]
+    [...dc.params, ...clicksWhere.params, ...pd.params]
   );
 
   const saleRows = all(
@@ -865,9 +1040,9 @@ function dailyTrend(source = "all", period = null) {
             COALESCE(SUM(CASE WHEN status = 'approved' THEN quantity ELSE 0 END), 0) AS approved,
             COALESCE(SUM(CASE WHEN status = 'approved' THEN amount_cents ELSE 0 END), 0) AS revenue,
             COALESCE(SUM(CASE WHEN status IN ('refunded','chargeback') THEN amount_cents ELSE 0 END), 0) AS refunds
-     FROM sales WHERE 1=1${salesWhere.sql}${pd.sql}
+     FROM sales WHERE 1=1${dc.sql}${salesWhere.sql}${pd.sql}
      GROUP BY day`,
-    [...salesWhere.params, ...pd.params]
+    [...dc.params, ...salesWhere.params, ...pd.params]
   );
 
   const byDay = new Map();
@@ -936,26 +1111,27 @@ function ensureEmptyDays(days, period) {
   return result;
 }
 
-function dashboardAggregates(source, period = null) {
+function dashboardAggregates(source, period = null, dashboardId) {
+  const dc = dashboardClause(dashboardId);
   const salesWhere = sourceClause(source);
   const clicksWhere = sourceClause(source);
   const spendWhere = sourceClause(source);
   const pd = period && period.sql ? { sql: period.sql, params: period.params } : { sql: "", params: [] };
   const approved = get(
-    `SELECT COALESCE(SUM(quantity), 0) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${salesWhere.sql}${pd.sql}`,
-    [...salesWhere.params, ...pd.params]
+    `SELECT COALESCE(SUM(quantity), 0) AS count, COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status = 'approved'${dc.sql}${salesWhere.sql}${pd.sql}`,
+    [...dc.params, ...salesWhere.params, ...pd.params]
   );
   const refunded = get(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${salesWhere.sql}${pd.sql}`,
-    [...salesWhere.params, ...pd.params]
+    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM sales WHERE status IN ('refunded', 'chargeback')${dc.sql}${salesWhere.sql}${pd.sql}`,
+    [...dc.params, ...salesWhere.params, ...pd.params]
   );
-  const totalSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE 1=1${salesWhere.sql}${pd.sql}`, [...salesWhere.params, ...pd.params]).n;
-  const pendingSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE status = 'pending'${salesWhere.sql}${pd.sql}`, [...salesWhere.params, ...pd.params]).n;
-  const clickCount = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM clicks WHERE 1=1${clicksWhere.sql}${pd.sql}`, [...clicksWhere.params, ...pd.params]).n;
-  const checkoutCount = get(`SELECT COUNT(*) AS n FROM checkouts WHERE 1=1${pd.sql}`, pd.params).n;
+  const totalSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE 1=1${dc.sql}${salesWhere.sql}${pd.sql}`, [...dc.params, ...salesWhere.params, ...pd.params]).n;
+  const pendingSales = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE status = 'pending'${dc.sql}${salesWhere.sql}${pd.sql}`, [...dc.params, ...salesWhere.params, ...pd.params]).n;
+  const clickCount = get(`SELECT COALESCE(SUM(quantity), 0) AS n FROM clicks WHERE 1=1${dc.sql}${clicksWhere.sql}${pd.sql}`, [...dc.params, ...clicksWhere.params, ...pd.params]).n;
+  const checkoutCount = get(`SELECT COUNT(*) AS n FROM checkouts WHERE 1=1${dc.sql}${pd.sql}`, [...dc.params, ...pd.params]).n;
   const spendCents = get(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM advertising_spend WHERE 1=1${spendWhere.sql}${pd.sql}`,
-    [...spendWhere.params, ...pd.params]
+    `SELECT COALESCE(SUM(amount_cents), 0) AS amount FROM advertising_spend WHERE 1=1${dc.sql}${spendWhere.sql}${pd.sql}`,
+    [...dc.params, ...spendWhere.params, ...pd.params]
   ).amount;
   return {
     approvedCount: approved.count,
@@ -992,6 +1168,7 @@ module.exports = {
   listClicks,
   countClicks,
   findClickByTrackroiId,
+  findClickDashboardByTrackroiId,
   insertCheckout,
   createCheckout,
   listCheckouts,
@@ -1009,6 +1186,11 @@ module.exports = {
   createSpend,
   insertImportRun,
   listImportRuns,
+  listDashboards,
+  getDashboard,
+  countDashboards,
+  createDashboard,
+  ensureDefaultDashboard,
   insertAuditLog,
   appendAuditLog,
   listAuditLogs,
@@ -1019,6 +1201,7 @@ module.exports = {
   upsertIntegration,
   getIntegration,
   listIntegrations,
+  listDashboardsWithIntegration,
   updateIntegrationField,
   setSettings,
   getSettings,

@@ -1,0 +1,51 @@
+=== CONFIGURAÇÃO DO APP META (TRACKROI) ===
+App ID: 1033357322852273
+
+=== DOMÍNIOS PARA ADICIONAR NO CAMPO "DOMÍNIOS DO APP" ===
+
+Para funcionar tanto em desenvolvimento local quanto em produção (Railway),
+adicionar os seguintes domínios no painel do Meta App:
+  https://developers.facebook.com/apps/1033357322852273/settings/basic/
+
+  1. localhost
+  2. trackroi-production.up.railway.app
+
+
+=== URIs DE REDIRECIONAMENTO VÁLIDOS (OAuth Redirect URIs) ===
+
+Adicionar no painel do Meta App em:
+  https://developers.facebook.com/apps/1033357322852273/fb-login/settings/
+
+  Para desenvolvimento local:
+    http://localhost:4100/api/integrations/connect/meta/callback
+
+  Para produção (Railway):
+    https://trackroi-production.up.railway.app/api/integrations/connect/meta/callback
+
+
+=== FLUXO DO OAUTH ===
+1. Usuário clica "Conectar Meta Ads" no TrackROI
+2. Abre popup → /api/integrations/connect/meta?token=XXX
+3. Backend redireciona para Facebook OAuth:
+   https://www.facebook.com/v22.0/dialog/oauth?client_id=1033357322852273&redirect_uri=<BACKEND_ORIGIN>/api/integrations/connect/meta/callback&...
+4. Facebook redireciona de volta para o callback com ?code=...&state=...
+5. Backend troca code por access_token e salva a integração
+
+O erro "domínio não incluído nos domínios do app" ocorre porque o
+redirect_uri aponta para um domínio que não está autorizado no app da Meta.
+
+
+=== COMO DESCOBRIR O DOMÍNIO DO RAILWAY ===
+  Domínio atual do projeto: trackroi-production.up.railway.app
+  Confirme no painel do Railway > seu projeto > Settings > Networking
+
+
+=== CHECKLIST RÁPIDO ===
+[ ] Acessar https://developers.facebook.com/apps/1033357322852273/
+[ ] Ir em Settings > Basic
+[ ] No campo "Domains", adicionar: localhost
+[ ] No campo "Domains", adicionar: trackroi-production.up.railway.app
+[ ] Ir em Facebook Login > Settings
+[ ] Em "Valid OAuth Redirect URIs", adicionar as 2 URIs acima
+[ ] Salvar alterações
+[ ] Testar a conexão novamente no TrackROI

@@ -147,6 +147,12 @@ function setLoginError(message) {
   node.textContent = message || "";
 }
 
+function setRegisterError(message) {
+  const node = el("register-error");
+  node.hidden = !message;
+  node.textContent = message || "";
+}
+
 function setButtonLoading(button, label) {
   if (!button) return;
   if (label) {
@@ -166,8 +172,10 @@ function showLogin() {
   if (app) app.hidden = true;
   const login = el("login-view");
   if (login) login.classList.add("visible");
+  showAuthForm("login");
   el("email-input").value = "";
   el("password-input").value = "";
+  setLoginError("");
 }
 
 function showApp() {
@@ -1823,6 +1831,36 @@ async function login(email, password) {
   await loadData();
 }
 
+function showAuthForm(which) {
+  const loginForm = el("login-form");
+  const registerForm = el("register-form");
+  if (loginForm) loginForm.hidden = which !== "login";
+  if (registerForm) registerForm.hidden = which !== "register";
+  setLoginError("");
+  setRegisterError("");
+  if (which === "register") {
+    el("register-name").value = "";
+    el("register-email").value = "";
+    el("register-password").value = "";
+  }
+}
+
+async function register(name, email, password) {
+  const result = await apiFetch("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ name, email, password }),
+    headers: { "Content-Type": "application/json" },
+  });
+  state.token = result.token;
+  state.user = result.user;
+  state.csrfToken = result.csrfToken || "";
+  localStorage.setItem(TOKEN_KEY, result.token);
+  if (state.csrfToken) localStorage.setItem(CSRF_KEY, state.csrfToken);
+  showApp();
+  startSSE();
+  await loadData();
+}
+
 async function bootstrap() {
   mountSidebarIcons();
   applySidebarState();
@@ -1840,6 +1878,30 @@ async function bootstrap() {
       setButtonLoading(submit, "");
     }
   });
+
+  el("register-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setRegisterError("");
+    const submit = el("register-form").querySelector("button[type=submit]");
+    const name = el("register-name").value.trim();
+    const email = el("register-email").value.trim();
+    const password = el("register-password").value;
+    if (!name || !email || password.length < 8) {
+      setRegisterError("Preencha nome, e-mail e uma senha com pelo menos 8 caracteres.");
+      return;
+    }
+    setButtonLoading(submit, "Criando conta…");
+    try {
+      await register(name, email, password);
+    } catch (error) {
+      setRegisterError(friendlyError(error));
+    } finally {
+      setButtonLoading(submit, "");
+    }
+  });
+
+  el("show-register").addEventListener("click", () => showAuthForm("register"));
+  el("show-login").addEventListener("click", () => showAuthForm("login"));
 
   window.addEventListener("hashchange", () => {
     const next = normalizeRoute(location.hash.slice(1) || "dashboard");

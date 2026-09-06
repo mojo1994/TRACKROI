@@ -7,6 +7,7 @@ const { URL } = require("url");
 const db = require("./src/db");
 const { logger, newRequestId } = require("./src/logger");
 const { encryptSecret, decryptSecret, assertEncryptionKey } = require("./src/crypto");
+const metaPixel = require("./src/metaPixel");
 const { buildDashboardFromAggregates } = require("./src/metrics");
 const { resolvePeriod } = require("./src/period");
 const { importCsv } = require("./src/csv-import");
@@ -561,6 +562,157 @@ function publicIntegration(provider, dashboardId) {
 
 function listPublicIntegrations(dashboardId) {
   return providers.list().map((provider) => publicIntegration(provider, dashboardId));
+}
+
+/* ------------------------------------------------------------- Meta Pixel (CAPI) */
+
+function pixelConnectionForUser(userId) {
+  const row = db.getPixel(userId);
+  if (!row) return null;
+  return {
+    pixelId: row.pixelId,
+    status: row.status,
+    connected: row.status === "connected",
+    connectedAt: row.connectedAt,
+    lastTestEventAt: row.lastTestEventAt,
+    lastSyncAt: row.lastSyncAt,
+    updatedAt: row.updatedAt,
+    tokenStored: true,
+  };
+}
+
+async function handlePixelPut(req, res, user) {
+  let body;
+  try {
+    body = await parseBody(req);
+  } catch (error) {
+    send(res, 400, { ok: false, error: error.message }, {}, req);
+    return;
+  }
+  const pixelId = String(body?.pixelId || body?.pixel_id || "").trim();
+  const accessToken = String(body?.accessToken || body?.access_token || "").trim();
+  if (!pixelId || !accessToken) {
+    send(res, 400, { ok: false, error: "Informe o ID do Pixel e o token de acesso." }, {}, req);
+    return;
+  }
+  if (!process.env.ENCRYPTION_KEY) {
+    send(res, 400, { ok: false, error: "ENCRYPTION_KEY não está configurada no servidor. Ative o recurso definindo essa variável.", code: "ENCRYPTION_KEY_MISSING" }, {}, req);
+    return;
+  }
+
+  let verified;
+  try {
+    verified = await metaPixel.validateCredentials({ pixelId, accessToken });
+  } catch (error) {
+    db.appendAuditLog({
+      actorUserId: user.id,
+      action: "pixel.validate_failed",
+      resourceType: "pixel",
+      resourceId: "meta_pixel",
+      metadata: { pixelId, error: error.message },
+    });
+    send(res, 400, { ok: false, error: error.message }, {}, req);
+    return;
+  }
+
+  const existing = db.getPixel(user.id);
+  db.upsertPixel(user.id, {
+    pixelId: verified.pixelId,
+    accessToken: encryptSecret(accessToken),
+    status: "connected",
+    connectedAt: existing?.connectedAt || new Date().toISOString(),
+  });
+  db.appendAuditLog({
+    actorUserId: user.id,
+    action: "pixel.connected",
+    resourceType: "pixel",
+    resourceId: "meta_pixel",
+    metadata: { pixelId: verified.pixelId, pixelName: verified.name || null },
+  });
+  send(res, 200, { ok: true, pixel: pixelConnectionForUser(user.id), verified: { pixelId: verified.pixelId, name: verified.name || null } }, {}, req);
+}
+
+async function handlePixelTest(req, res, user) {
+  const row = db.getPixel(user.id, { includeToken: true });
+  if (!row) {
+    send(res, 400, { ok: false, error: "Conecte o seu Pixel primeiro." }, {}, req);
+    return;
+  }
+  const accessToken = row.accessToken ? decryptSecret(row.accessToken) : null;
+  if (!accessToken) {
+    send(res, 400, { ok: false, error: "Token do Pixel não encontrado. Reconecte o Pixel." }, {}, req);
+    return;
+  }
+  let body = {};
+  try {
+    body = await parseBody(req);
+  } catch {
+    body = {};
+  }
+  const testEventCode = String(body?.testEventCode || body?.test_event_code || "").trim() || undefined;
+  try {
+    const result = await metaPixel.sendTestEvent({ pixelId: row.pixelId, accessToken, testEventCode });
+    db.touchPixelField(user.id, "last_test_event_at");
+    db.appendAuditLog({
+      actorUserId: user.id,
+      action: "pixel.test_sent",
+      resourceType: "pixel",
+      resourceId: "meta_pixel",
+      metadata: result,
+    });
+    send(res, 200, { ok: true, ...result }, {}, req);
+  } catch (error) {
+    db.appendAuditLog({
+      actorUserId: user.id,
+      action: "pixel.test_failed",
+      resourceType: "pixel",
+      resourceId: "meta_pixel",
+      metadata: { error: error.message },
+    });
+    send(res, 502, { ok: false, error: error.message }, {}, req);
+  }
+}
+
+function dispatchPurchaseForApprovedSale({ userId, dashboardId, transactionId, trackroiClickId, valueCents, currency, quantity, productName, email, clientIp }) {
+  if (!userId) return;
+  (async () => {
+    try {
+      const pixel = db.getPixel(userId, { includeToken: true });
+      if (!pixel || pixel.status !== "connected") {
+        logger.debug("Meta Pixel não configurado para o dono da venda; evento CAPI ignorado", { userId });
+        return;
+      }
+      const accessToken = pixel.accessToken ? decryptSecret(pixel.accessToken) : null;
+      if (!accessToken) return;
+      const click = trackroiClickId ? db.findClickByTrackroiIdAny(trackroiClickId) : null;
+      const eventId = `pp:${transactionId}:${dashboardId}`;
+      const result = await metaPixel.sendPurchaseForSale({
+        pixelId: pixel.pixelId,
+        accessToken,
+        event: eventId,
+        valueCents,
+        currency,
+        quantity,
+        contentName: productName,
+        email,
+        fbclid: click?.fbclid,
+        clickCreatedAt: click?.createdAt,
+        eventSourceUrl: click?.landingPage || null,
+        clientIpAddress: clientIp,
+      });
+      db.touchPixelField(userId, "last_sync_at");
+      logger.info("Meta CAPI Purchase enviado", { pixelId: pixel.pixelId, eventId, eventsReceived: result.eventsReceived });
+    } catch (error) {
+      db.appendAuditLog({
+        actorUserId: userId,
+        action: "pixel.send_failed",
+        resourceType: "pixel",
+        resourceId: "meta_pixel",
+        metadata: { eventId: `pp:${transactionId}:${dashboardId}`, error: error.message },
+      });
+      logger.warn("Meta CAPI Purchase falhou", { error: error.message, eventId: `pp:${transactionId}:${dashboardId}` });
+    }
+  })();
 }
 
 async function handleMetaSync(req, res, user, dashboardId) {
@@ -1162,6 +1314,18 @@ async function handlePerfectPayWebhook(req, res) {
         resourceId: db.makeId("sa"),
         metadata: { amountCents: event.amountCents, currency: event.currency },
       });
+      dispatchPurchaseForApprovedSale({
+        userId: dashOwner?.owner_id || null,
+        dashboardId,
+        transactionId: event.transactionId,
+        trackroiClickId: event.trackroiClickId,
+        valueCents: event.amountCents,
+        currency: event.currency,
+        quantity: event.quantity || 1,
+        productName: event.product?.name || event.plan?.product_name || event.plan?.name || null,
+        email: event.customer?.email || null,
+        clientIp: String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim() || null,
+      });
     }
   }
 
@@ -1418,6 +1582,27 @@ async function main() {
       if (req.method === "GET" && pathname === "/api/settings") {
         const dashboardId = resolveDashboardId(auth, req);
         send(res, 200, { ok: true, settings: db.getSettings(dashboardId) }, {}, req);
+        return;
+      }
+
+      if (pathname === "/api/pixel") {
+        if (req.method === "GET") {
+          send(res, 200, { ok: true, pixel: pixelConnectionForUser(auth.user.id) }, {}, req);
+          return;
+        }
+        if (req.method === "PUT") {
+          await handlePixelPut(req, res, auth.user);
+          return;
+        }
+        if (req.method === "DELETE") {
+          db.deletePixel(auth.user.id);
+          db.appendAuditLog({ actorUserId: auth.user.id, action: "pixel.disconnected", resourceType: "pixel", resourceId: "meta_pixel" });
+          send(res, 200, { ok: true, pixel: null }, {}, req);
+          return;
+        }
+      }
+      if (req.method === "POST" && pathname === "/api/pixel/test") {
+        await handlePixelTest(req, res, auth.user);
         return;
       }
 

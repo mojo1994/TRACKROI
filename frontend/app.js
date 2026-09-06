@@ -425,11 +425,12 @@ const routeFetch = {
     return { ok: true, products: products.items || [] };
   },
   connections: async () => {
-    const [integrations, imports] = await Promise.all([
+    const [integrations, imports, pixel] = await Promise.all([
       apiFetch("/api/integrations"),
       apiFetch("/api/imports"),
+      apiFetch("/api/pixel"),
     ]);
-    return { ok: true, integrations: integrations.items || [], imports: imports.items || [] };
+    return { ok: true, integrations: integrations.items || [], imports: imports.items || [], pixel: pixel.pixel || null };
   },
   settings: async () => {
     const settings = await apiFetch("/api/settings");
@@ -1255,6 +1256,61 @@ function connectedSummaryHtml(item) {
   `;
 }
 
+function pixelCardHtml(pixel) {
+  const connected = !!(pixel && pixel.connected);
+  const body = connected
+    ? `
+      <div class="conn-summary">
+        <div class="conn-health"><span class="conn-health-dot"></span>Pixel conectado</div>
+        <div class="conn-account">Pixel ${escapeHtml(pixel.pixelId)}</div>
+        <div class="conn-stats">
+          <span>Token: <b>•••• armazenado (somente leitura)</b></span>
+          ${pixel.lastTestEventAt ? `<span>Último teste: <b>${escapeHtml(formatDateTime(pixel.lastTestEventAt))}</b></span>` : ""}
+          ${pixel.lastSyncAt ? `<span>Última venda enviada: <b>${escapeHtml(formatDateTime(pixel.lastSyncAt))}</b></span>` : ""}
+        </div>
+      </div>
+      <div class="connection-message" data-pixel-message hidden></div>
+      <div class="connection-actions">
+        <form id="pixel-test-form" class="inline-form compact-form">
+          <input id="pixel-test-code" type="text" placeholder="Código de teste (opcional)" autocomplete="off" />
+          <button type="submit" class="btn-primary">Testar Pixel</button>
+          <span class="import-status" id="pixel-test-status"></span>
+        </form>
+      </div>
+      <div class="connection-actions">
+        <button type="button" class="ghost danger" id="pixel-disconnect-button">Desconectar</button>
+      </div>
+    `
+    : `
+      <div class="connection-line">Conecte o seu próprio Meta Pixel para enviar cada venda aprovada direto para a API de Conversões — sem depender de OAuth nem de revisão do Facebook.</div>
+      <form id="pixel-form" class="stack-form compact-form">
+        <label><span>ID do Pixel</span><input id="pixel-id" type="text" placeholder="Ex.: 123456789012345" autocomplete="off" /></label>
+        <label><span>Token de acesso do Conversions API</span><input id="pixel-token" type="password" placeholder="Gerado em Gerenciador de Eventos" autocomplete="new-password" /></label>
+        <p class="form-hint">Vá em <b>Gerenciador de Eventos → seu Pixel → Configurações → API de Conversões → Gerar token de acesso</b> e cole aqui. A configuração é validada na Meta antes de salvar.</p>
+        <div class="connection-actions">
+          <button type="submit" class="btn-primary">Conectar Pixel</button>
+          <span class="import-status" id="pixel-status"></span>
+        </div>
+      </form>
+      <div class="connection-message" data-pixel-message hidden></div>
+    `;
+  return `
+    <article class="connection-card ${connected ? "is-connected" : ""}">
+      <div class="connection-card-head">
+        <div class="connection-logo">P</div>
+        <div class="connection-card-title">
+          <div class="connection-name">Meta Pixel</div>
+          <div class="connection-desc">Conversões (CAPI) da sua loja</div>
+        </div>
+        ${statusPill(connected ? "connected" : "configured")}
+      </div>
+      <div class="connection-card-body">
+        ${body}
+      </div>
+    </article>
+  `;
+}
+
 function connectionCard(item) {
   const connected = item.connected === true;
   const status = connected || item.status === "connected" ? "connected" : item.status || "not_connected";
@@ -1417,6 +1473,7 @@ function connectionsPage(data) {
 
   const cards = `
     <section class="connections-layout">
+      ${pixelCardHtml(data.pixel)}
       ${integrations.map((item) => connectionCard(item)).join("")}
       ${integrations.length === 0 ? `<div class="empty-state">Nenhuma integração disponível neste momento.</div>` : ""}
     </section>
@@ -1981,6 +2038,79 @@ function attachPageHandlers() {
         setStatus(friendlyError(error), "error");
       } finally {
         setButtonLoading(submit, "");
+      }
+    };
+  }
+
+const pixelForm = el("pixel-form");
+  if (pixelForm) {
+    pixelForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const submit = pixelForm.querySelector("button[type=submit]");
+      const statusNode = el("pixel-status");
+      setButtonLoading(submit, "Validando na Meta…");
+      if (statusNode) statusNode.textContent = "";
+      const messageNode = pixelForm.parentElement.querySelector("[data-pixel-message]");
+      if (messageNode) {
+        messageNode.hidden = true;
+        messageNode.classList.remove("is-error");
+      }
+      try {
+        await apiFetch("/api/pixel", {
+          method: "PUT",
+          body: JSON.stringify({ pixelId: el("pixel-id").value.trim(), accessToken: el("pixel-token").value.trim() }),
+        });
+        setStatus("Pixel conectado com sucesso.", "success");
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        const message = friendlyError(error);
+        setStatus(message, "error");
+        if (messageNode) {
+          messageNode.textContent = message;
+          messageNode.classList.add("is-error");
+          messageNode.hidden = false;
+        }
+      } finally {
+        setButtonLoading(submit, "");
+      }
+    };
+  }
+
+  const pixelTestForm = el("pixel-test-form");
+  if (pixelTestForm) {
+    pixelTestForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const statusNode = el("pixel-test-status");
+      if (statusNode) statusNode.textContent = "";
+      try {
+        const result = await apiFetch("/api/pixel/test", {
+          method: "POST",
+          body: JSON.stringify({ testEventCode: el("pixel-test-code").value.trim() }),
+        });
+        if (statusNode) {
+          statusNode.textContent = result.eventsReceived > 0
+            ? `Enviado ✓ ${result.eventsReceived} evento(s) recebido(s) pela Meta.`
+            : `Enviado ✓ (${result.message || "confira em Eventos de Teste"})`;
+        }
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        const message = friendlyError(error);
+        if (statusNode) statusNode.textContent = message;
+        setStatus(message, "error");
+      }
+    };
+  }
+
+  const pixelDisconnectButton = el("pixel-disconnect-button");
+  if (pixelDisconnectButton) {
+    pixelDisconnectButton.onclick = async () => {
+      if (!window.confirm("Desconectar o Meta Pixel? As vendas aprovadas deixarão de ser enviadas para a Meta.")) return;
+      try {
+        await apiFetch("/api/pixel", { method: "DELETE" });
+        setStatus("Pixel desconectado.", "success");
+        await loadData(state.route, { silent: true });
+      } catch (error) {
+        setStatus(friendlyError(error), "error");
       }
     };
   }

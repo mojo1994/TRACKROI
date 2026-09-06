@@ -193,6 +193,17 @@ function migrateSchema() {
       count INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS user_pixels (
+      user_id TEXT PRIMARY KEY,
+      pixel_id TEXT NOT NULL,
+      access_token TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'connected',
+      connected_at TEXT NOT NULL,
+      last_test_event_at TEXT,
+      last_sync_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS import_runs (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL,
@@ -532,6 +543,11 @@ function findClickByTrackroiId(trackroiClickId, dashboardId) {
 function findClickDashboardByTrackroiId(trackroiClickId) {
   const row = get("SELECT dashboard_id FROM clicks WHERE trackroi_click_id = ? LIMIT 1", [String(trackroiClickId || "")]);
   return row ? String(row.dashboard_id || "").trim() : null;
+}
+
+function findClickByTrackroiIdAny(trackroiClickId) {
+  const row = get("SELECT * FROM clicks WHERE trackroi_click_id = ? LIMIT 1", [String(trackroiClickId || "")]);
+  return row ? mapClick(row) : null;
 }
 
 /* ------------------------------------------------------------- Checkouts */
@@ -921,6 +937,50 @@ function clearIntegration(providerId, dashboardId) {
   run("DELETE FROM integrations WHERE provider_id = ? AND dashboard_id = ?", [providerId, String(dashboardId || "").trim()]);
 }
 
+/* ------------------------------------------------------------- Meta Pixel (CAPI) */
+
+function upsertPixel(userId, data) {
+  const existing = get("SELECT user_id, connected_at FROM user_pixels WHERE user_id = ?", [String(userId)]);
+  const now = new Date().toISOString();
+  const connectedAt = data.connectedAt || existing?.connected_at || now;
+  if (existing) {
+    run(
+      "UPDATE user_pixels SET pixel_id = ?, access_token = ?, status = ?, connected_at = ?, updated_at = ? WHERE user_id = ?",
+      [String(data.pixelId || ""), String(data.accessToken || ""), String(data.status || "connected"), connectedAt, now, String(userId)]
+    );
+  } else {
+    run(
+      "INSERT INTO user_pixels (user_id, pixel_id, access_token, status, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [String(userId), String(data.pixelId || ""), String(data.accessToken || ""), String(data.status || "connected"), connectedAt, now]
+    );
+  }
+}
+
+function getPixel(userId, { includeToken = false } = {}) {
+  const row = get("SELECT * FROM user_pixels WHERE user_id = ?", [String(userId)]);
+  if (!row) return null;
+  const out = {
+    userId: row.user_id,
+    pixelId: row.pixel_id,
+    status: row.status,
+    connectedAt: row.connected_at,
+    lastTestEventAt: row.last_test_event_at,
+    lastSyncAt: row.last_sync_at,
+    updatedAt: row.updated_at,
+  };
+  if (includeToken) out.accessToken = row.access_token;
+  return out;
+}
+
+function touchPixelField(userId, field, value = new Date().toISOString()) {
+  if (!["last_test_event_at", "last_sync_at"].includes(field)) return;
+  run(`UPDATE user_pixels SET ${field} = ? WHERE user_id = ?`, [value, String(userId)]);
+}
+
+function deletePixel(userId) {
+  run("DELETE FROM user_pixels WHERE user_id = ?", [String(userId)]);
+}
+
 /* ------------------------------------------------------------- Settings */
 
 function settingsKey(dashboardId) {
@@ -1173,6 +1233,7 @@ module.exports = {
   countClicks,
   findClickByTrackroiId,
   findClickDashboardByTrackroiId,
+  findClickByTrackroiIdAny,
   insertCheckout,
   createCheckout,
   listCheckouts,
@@ -1208,6 +1269,10 @@ module.exports = {
   listDashboardsWithIntegration,
   updateIntegrationField,
   clearIntegration,
+  upsertPixel,
+  getPixel,
+  touchPixelField,
+  deletePixel,
   setSettings,
   getSettings,
   createCsrfToken,

@@ -1094,7 +1094,7 @@ function connectionCard(item) {
   const isMeta = item.id === "meta";
   const connectAction = notConfigured
     ? `<span class="ghost" disabled>Configuração pendente</span>`
-    : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${connected ? "Reconectar" : isMeta ? "Conectar Meta Ads" : "Conectar"}</button>`;
+    : `<button type="button" class="btn-primary" data-connect-button="${escapeHtml(item.id)}">${isMeta ? (connected ? "Reconectar" : "Conectar Meta Ads") : "Configurar webhook"}</button>`;
   const actions = `
       ${connectAction}
       ${isMeta && connected ? `<button type="button" class="ghost" data-sync-button="${escapeHtml(item.id)}">Sincronizar agora</button>` : ""}

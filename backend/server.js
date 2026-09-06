@@ -319,43 +319,60 @@ function oauthResultHtml({ providerId, ok, error, connectedAccount }) {
 </html>`;
 }
 
-function renderPerfectPayForm({ token, dashboardId, error }) {
+function renderPerfectPayWebhookSetup({ token, dashboardId, error }) {
+  const webhookUrl = defaultPerfectPayWebhookUrl(dashboardId || "");
   const safeError = error ? `<div class="error">${escapeHtml(error)}</div>` : "";
   return `<!doctype html>
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Conectar Perfect Pay</title>
+    <title>Perfect Pay via Webhook</title>
     <style>
       :root { color-scheme: dark; --bg:#0a0a0c; --panel:#121418; --border:#1f232b; --text:#f5f7fa; --muted:#8b93a1; --accent:#39ff88; }
       * { box-sizing: border-box; }
       body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font-family:Inter, Segoe UI, Arial, sans-serif; padding:24px; }
-      .card { width:min(460px,100%); border:1px solid var(--border); border-radius:14px; background:var(--panel); padding:28px; box-shadow:0 22px 60px rgba(0,0,0,.35); }
+      .card { width:min(520px,100%); border:1px solid var(--border); border-radius:14px; background:var(--panel); padding:28px; box-shadow:0 22px 60px rgba(0,0,0,.35); }
       h1 { margin:0 0 6px; font-size:20px; }
-      p { margin:0 0 18px; color:var(--muted); font-size:14px; line-height:1.5; }
-      form { display:grid; gap:14px; }
-      label { display:grid; gap:6px; font-size:12px; color:var(--muted); }
-      input { height:42px; border-radius:8px; border:1px solid var(--border); background:#0d0f13; color:var(--text); padding:0 14px; }
-      button { height:42px; border-radius:8px; border:1px solid var(--border); background:var(--accent); color:#04140a; font-weight:600; cursor:pointer; }
+      p { margin:0 0 16px; color:var(--muted); font-size:14px; line-height:1.5; }
+      ol { margin:0 0 18px; padding-left:18px; color:var(--muted); font-size:14px; line-height:1.7; }
+      .urlbox { display:flex; gap:8px; margin:0 0 14px; }
+      .urlbox input { flex:1; height:42px; border-radius:8px; border:1px solid var(--border); background:#0d0f13; color:var(--text); padding:0 12px; font-size:12px; }
+      button { height:42px; border-radius:8px; border:1px solid var(--border); background:var(--accent); color:#04140a; font-weight:600; cursor:pointer; padding:0 16px; }
+      button.ghost { background:transparent; color:var(--text); border-color:var(--border); }
       .error { margin-top:14px; padding:12px 14px; border-radius:8px; border:1px solid rgba(255,107,107,.25); background:rgba(255,107,107,.08); color:#ffb3b3; font-size:13px; }
-      .note { margin-top:14px; font-size:12px; color:var(--muted); }
     </style>
   </head>
   <body>
     <section class="card">
-      <h1>Conectar Perfect Pay</h1>
-      <p>Use o e-mail e a senha da sua conta Perfect Pay para gerar o token de acesso no backend.</p>
-      <form method="post" action="/api/integrations/connect/perfectpay">
-        <input type="hidden" name="token" value="${escapeHtml(token)}" />
-        ${dashboardId ? `<input type="hidden" name="dashboard_id" value="${escapeHtml(dashboardId)}" />` : ""}
-        <label><span>E-mail da Perfect Pay</span><input name="email" type="email" autocomplete="username" required /></label>
-        <label><span>Senha</span><input name="password" type="password" autocomplete="current-password" required /></label>
-        <button type="submit">Conectar Perfect Pay</button>
-      </form>
+      <h1>Perfect Pay — sem plug-and-play</h1>
+      <p>O TrackROI agora recebe as vendas da Perfect Pay direto pelo webhook deles. Não é mais necessário conectar com e-mail e senha.</p>
+      <ol>
+        <li>No painel da Perfect Pay, abra <b>Webhooks</b> e crie um novo webhook.</li>
+        <li>Cole a URL abaixo como destino dos eventos.</li>
+        <li>Ative os eventos desejados: <b>aprovação de venda</b>, <b>pré-checkout</b>, etc.</li>
+        <li>Opcional (recomendado): copie o <b>Token String(32)</b> do webhook e cole no campo "Token do Webhook" em Conexões → Configurações avançadas.</li>
+      </ol>
+      <div class="urlbox">
+        <input type="text" value="${escapeHtml(webhookUrl)}" readonly />
+        <button type="button" class="ghost" id="copy-url">Copiar</button>
+      </div>
       ${safeError}
-      <div class="note">Esta janela será fechada automaticamente após conectar.</div>
+      <button type="button" id="done">Concluir</button>
     </section>
+    <script>
+      document.getElementById("copy-url").onclick = async function () {
+        var input = document.querySelector(".urlbox input");
+        try { await navigator.clipboard.writeText(input.value); } catch (e) { input.select(); document.execCommand("copy"); }
+        document.getElementById("copy-url").textContent = "Copiado!";
+      };
+      document.getElementById("done").onclick = function () {
+        if (window.opener) {
+          try { window.opener.postMessage({ type: "trackroi:oauth", provider: "perfectpay", ok: true, connectedAccount: "Webhook configurado" }, "*"); } catch (e) {}
+        }
+        window.close();
+      };
+    </script>
   </body>
 </html>`;
 }
@@ -402,7 +419,8 @@ async function handleConnectStart(req, res, match) {
     return;
   }
   if (provider.id === "perfectpay") {
-    sendRawHtml(res, renderPerfectPayForm({ token, dashboardId: scopedDashboard, error: "" }));
+    const dashboard = scopedDashboard || db.ensureDefaultDashboard(user.id);
+    sendRawHtml(res, renderPerfectPayWebhookSetup({ token, dashboardId: dashboard?.id || "", error: "" }));
     return;
   }
   const state = scopedDashboard ? `${token}|${scopedDashboard}` : token;
@@ -484,61 +502,7 @@ async function handleOAuthCallback(req, res, match) {
 }
 
 async function handlePerfectPaySubmit(req, res) {
-  let body;
-  try {
-    body = await parseBody(req, true);
-  } catch (error) {
-    sendRawHtml(res, oauthResultHtml({ providerId: "perfectpay", ok: false, error: "Dados do formulário inválidos." }));
-    return;
-  }
-  const { body: fields, raw } = body || {};
-  const provider = providers.get("perfectpay");
-  const token = String(fields?.token || "").trim();
-  let dashboardId = String(fields?.dashboard_id || "").trim();
-  const user = token ? db.getUserByToken(token) : null;
-  if (!user) {
-    sendRawHtml(res, oauthResultHtml({ providerId: "perfectpay", ok: false, error: "Sessão expirada. Reabra a página de conexões e tente novamente." }));
-    return;
-  }
-  if (dashboardId) {
-    const dash = db.getDashboard(dashboardId);
-    if (!dash || String(dash.owner_id) !== String(user.id)) {
-      dashboardId = "";
-    }
-  }
-  if (!fields?.email || !fields?.password) {
-    sendRawHtml(res, renderPerfectPayForm({ token, dashboardId, error: "Preencha e-mail e senha para continuar." }));
-    return;
-  }
-  try {
-    const result = await provider.handleAuth({ email: String(fields.email).trim(), password: String(fields.password) });
-    const existing = db.getIntegration("perfectpay", dashboardId);
-    storeConnection("perfectpay", {
-      accessToken: encryptSecret(result.accessToken),
-      connectedAccount: result.connectedAccount || null,
-      apiStatus: "connected",
-      retryStatus: "idle",
-      webhookUrl: existing.webhookUrl || null,
-    }, dashboardId);
-    db.appendAuditLog({
-      actorUserId: user.id,
-      action: "integration.perfectpay.connected",
-      resourceType: "integration",
-      resourceId: "perfectpay",
-      metadata: dashboardId ? { dashboardId } : null,
-    });
-    broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user.id);
-    sendRawHtml(res, oauthResultHtml({ providerId: "perfectpay", ok: true, connectedAccount: result.connectedAccount }));
-  } catch (error) {
-    logger.error("Perfect Pay connect failed", { error: error.message });
-    db.appendAuditLog({
-      action: "integration.perfectpay.connect_failed",
-      resourceType: "integration",
-      resourceId: "perfectpay",
-      metadata: { error: error.message },
-    });
-    sendRawHtml(res, renderPerfectPayForm({ token, error: friendlyProviderError("perfectpay", error) }));
-  }
+  send(res, 410, { ok: false, error: "A conexão da Perfect Pay por e-mail/senha foi desativada. Use 'Configurar webhook' em Conexões." }, {}, req);
 }
 
 /* ------------------------------------------------------------- Integrations */
@@ -1320,7 +1284,7 @@ async function main() {
           return;
         }
         if (req.method === "POST") {
-          await handlePerfectPaySubmit(req, res);
+          send(res, 410, { ok: false, error: "A conexão da Perfect Pay por e-mail/senha foi desativada. Use 'Configurar webhook' em Conexões." }, {}, req);
           return;
         }
       }

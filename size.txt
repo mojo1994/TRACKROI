@@ -1,0 +1,88 @@
+<responsive_design_brief project="TrackROI" scope="full_app_responsive_pass" target_agent="opencode">
+
+  <context>
+    <current_state>TrackROI is a vanilla JS SPA with a fixed 260px sidebar (collapsing to 92px icon-only via a dedicated toggle), CSS Grid-based card layouts (KPI cards, funnel, connections, metrics), and native HTML tables with horizontal scroll. There is currently no dedicated mobile/tablet layout — the app effectively only adapts down to a single "stack everything at 1100px/640px" media query, and several elements (long numeric values, table cells, campaign names) are already known to overflow their containers on smaller screens.</current_state>
+    <goal>Make every screen of TrackROI (Dashboard, Vendas, Funil, Métricas, Produtos, Conexões, Configurações, Logs, Login) fully usable and visually polished on mobile phones, tablets, laptops, and large desktop monitors — with zero text or element overflowing its container at any breakpoint.</goal>
+  </context>
+
+  <negative_prompt>
+    <avoid>Text, numbers, or labels visually spilling outside their card/container boundary at any screen width</avoid>
+    <avoid>A desktop-first layout that just "shrinks" on mobile without deliberate restructuring (e.g. sidebar remaining a fixed-width rail on a 375px screen)</avoid>
+    <avoid>Horizontal scrollbars appearing on the page body itself (table-level horizontal scroll inside a contained wrapper is acceptable; page-level horizontal scroll is not)</avoid>
+    <avoid>Touch targets smaller than 44x44px on mobile (buttons, nav items, dropdown triggers)</avoke>
+    <avoid>Reflowing the entire page layout on every resize event without debouncing, causing jank</avoid>
+  </negative_prompt>
+
+  <breakpoint_system>
+    <requirement>Define a consistent set of breakpoints used across the entire CSS, replacing the current ad-hoc 1100px/640px pair: mobile (0-599px), tablet (600-1023px), laptop (1024-1439px), desktop (1440px+). Every component's responsive rules should map to this shared scale rather than introducing new one-off breakpoints per component.</requirement>
+    <requirement>Use CSS custom properties or a shared SCSS/PostCSS variable set for these breakpoints if the build allows it, so they stay in sync across all stylesheets.</requirement>
+  </breakpoint_system>
+
+  <root_cause_of_text_overflow>
+    <finding>Flex and Grid children default to `min-width: auto`, which means a child containing a long unbroken string (a number, an email, a long campaign name) will refuse to shrink below its content's natural width — this is the most common cause of "text vazando pra fora" in CSS Grid/Flexbox layouts, and is very likely the root cause across TrackROI's cards, table cells, and connection-card summaries.</finding>
+    <fix_required>Apply `min-width: 0` (and `min-height: 0` where relevant) to every direct flex/grid item that contains text content across the app — metric cards, connection-card summaries, table cells, nav labels, panel headers. This single rule change resolves the majority of overflow cases without touching the visual design.</fix_required>
+    <fix_required>For elements holding numeric KPI values (e.g. `.metric-value`, currently `white-space: nowrap`), replace hard `nowrap` with a responsive rule: keep `nowrap` and let the font-size scale down via `clamp()` on narrow containers instead, OR allow wrapping onto a second line with `overflow-wrap: break-word` on mobile specifically — choose whichever reads better once tested, but never let it silently overflow the card.</fix_required>
+    <fix_required>For any remaining long unbreakable string (long product names, campaign names, emails), apply `overflow: hidden; text-overflow: ellipsis; white-space: nowrap;` with a `title` attribute holding the full value for hover/long-press reveal, rather than letting it overflow or forcing the container to grow.</fix_required>
+  </root_cause_of_text_overflow>
+
+  <component name="sidebar_navigation">
+    <desktop_tablet_laptop>Keep the existing expand/collapse icon-rail behavior (from the earlier sidebar animation spec) for viewports ≥1024px.</desktop_tablet_laptop>
+    <mobile>
+      <requirement>Below 1024px, replace the persistent sidebar entirely with an off-canvas drawer: hidden by default, triggered by a hamburger icon in a slim top app bar, sliding in from the left over a semi-transparent backdrop, and closing on backdrop tap, route change, or swipe-left gesture.</requirement>
+      <requirement>The top app bar on mobile must always show: hamburger icon, current page title, and (if applicable) a condensed version of the page's primary action button — never the full desktop topbar-controls row cramped into a narrow width.</requirement>
+    </mobile>
+  </component>
+
+  <component name="card_grids" applies_to="dashboard_kpis, metrics_kpis, metrics_resumo_detalhado, connections_layout, cards_grid, info_grid">
+    <mobile>1 column, full width, comfortable vertical spacing between cards (16px min).</mobile>
+    <tablet>2 columns.</tablet>
+    <laptop>3-4 columns depending on the specific grid's item count (reuse the fixed-column/flex-grow fix already specified for orphaned last-row items).</laptop>
+    <desktop>Current large-screen layout, capped at a sensible max column count so cards never become excessively wide and sparse.</desktop>
+    <requirement>Card internal padding should scale down slightly on mobile (e.g. 22px → 16px) to preserve proportion without wasting screen real estate, while keeping enough breathing room that text never touches the edges.</requirement>
+  </component>
+
+  <component name="tables" applies_to="sales_table, imported_reports_table, webhook_events_table, audit_logs_table">
+    <tablet_laptop_desktop>Keep the existing horizontal-scroll-within-a-contained-wrapper pattern, but ensure the wrapper never lets the scroll bleed into the page body (contain the scroll strictly to `.table-wrap`).</tablet_laptop_desktop>
+    <mobile>
+      <requirement>Replace the raw `<table>` rendering with a stacked card-per-row layout below 600px: each row becomes a compact card showing label-value pairs stacked vertically (e.g. "Pagamento: Perfect Pay", "Status: Aprovado", "Valor: R$ 39,71"), so no horizontal scrolling or cramped columns are needed at all on phones.</requirement>
+      <requirement>Preserve the same data and status-pill styling in this stacked layout — this is a structural/responsive change, not a data or visual-identity change.</requirement>
+    </mobile>
+  </component>
+
+  <component name="funnel_chart">
+    <requirement>The ultra-violet funnel SVG must use a `viewBox` with `preserveAspectRatio` so it scales fluidly to its container width at every breakpoint, remaining legible (labels not overlapping, glow effect not visually broken) from a 360px-wide phone screen up to a 4K desktop monitor.</requirement>
+    <requirement>On mobile, stage labels/values that would normally sit beside the shape should reflow below or above their stage band rather than overlapping the incandescent fill.</requirement>
+  </component>
+
+  <component name="connections_page">
+    <requirement>Below 1024px, connection cards (Meta Ads / Perfect Pay / any future provider) stack in a single column at full width, and the hero banner's step-progress element reflows below the heading/description text rather than sitting beside it (reuse the existing sub-1100px hero rule, verify it still holds after the sidebar/grid changes above).</requirement>
+  </component>
+
+  <component name="login_screen">
+    <requirement>Confirm the existing single-column fallback below 1100px still renders cleanly with the new breakpoint scale, and that the login form's inputs and button meet the 44px minimum touch target height on mobile.</requirement>
+  </component>
+
+  <typography_scaling>
+    <requirement>Use `clamp()` for major heading and KPI value font sizes (e.g. `font-size: clamp(22px, 4vw, 30px)` for `.metric-value`) so text scales fluidly between breakpoints instead of jumping abruptly at fixed media-query steps, further reducing overflow risk.</requirement>
+  </typography_scaling>
+
+  <performance_considerations>
+    <requirement>Debounce any JS resize/orientation-change listeners (if the app adds any for responsive behavior) to avoid layout thrashing on mobile devices during rotation or on-screen-keyboard toggling.</requirement>
+    <requirement>Ensure the mobile drawer's open/close transition uses `transform` (translateX) rather than animating `width`/`left`, for GPU-accelerated, jank-free motion consistent with the "fluid" sidebar requirement from the desktop spec.</requirement>
+    <requirement>Avoid loading/rendering the full desktop sidebar DOM (with its expand/collapse machinery) on mobile if it's not needed — conditionally mount the appropriate navigation pattern per breakpoint to keep the DOM lean on low-power devices.</requirement>
+  </performance_considerations>
+
+  <qa_checklist>
+    <check>No element's text or numeric content overflows its visual container at 360px, 768px, 1024px, 1440px, and 1920px widths.</check>
+    <check>No page-level horizontal scrollbar appears at any tested width.</check>
+    <check>Every interactive element (buttons, nav items, form inputs, table row actions) has a minimum 44x44px touch target on mobile.</check>
+    <check>Sidebar drawer opens/closes smoothly on mobile with no layout shift or content jump underneath it.</check>
+    <check>Funnel chart, KPI cards, and tables all remain legible and correctly proportioned at every breakpoint.</check>
+  </qa_checklist>
+
+  <deliverable_format>
+    <scope>Full responsive CSS pass across every existing page/component (Dashboard, Vendas, Funil, Métricas, Produtos, Conexões, Configurações, Logs, Login, sidebar), plus the minimal JS needed for the mobile drawer pattern (open/close state, backdrop, route-change auto-close). No backend or data-layer changes required.</scope>
+    <constraint>Preserve all existing visual identity decisions from prior design passes (dark theme, incandescent funnel gradient, sidebar collapse animation, card hierarchy) — this pass adapts them across screen sizes, it does not redesign them.</constraint>
+  </deliverable_format>
+
+</responsive_design_brief>

@@ -1,119 +1,38 @@
-<layout_fix_brief project="TrackROI" screen="metrics_page" target_agent="opencode">
+<layout_fix_brief project="TrackROI" screen="metrics_page_grid_spacing" target_agent="opencode">
 
   <problem_diagnosis>
     <issue id="1">
-      <cause>Both the primary KPI row (Investimento, Receita, Lucro, ROAS, ROI, CPA) and the secondary "Resumo detalhado" row (Cliques, Checkouts Iniciados, Vendas Aprovadas, Pendentes, AOV, Taxa de Conversão) use a grid with a low minmax floor (200px / 180px) and auto-fit, which forces all 6 items into a single cramped row on wide viewports. Cards end up narrow with values sitting close to the edges, and there's no visual breathing room.</cause>
-      <fix_required>Cap the number of columns per row (e.g. max 4 for the primary KPI row, max 3-4 for the secondary row) instead of letting auto-fit cram every item into one line. Use a higher minmax floor (e.g. 240-260px) combined with an explicit max column count via clamp/media queries so cards keep comfortable internal spacing at any viewport width, wrapping to a second row instead of shrinking.</fix_required>
+      <cause>Cards inside the "Resumo detalhado" grid rows are rendering with no visible gap between them — borders touch or nearly touch adjacent cards, making the row look like one solid glued block instead of distinct cards. This suggests the grid's `gap` value is either too small, being overridden, or the card's own border/margin is collapsing against its neighbor.</cause>
+      <fix_required>Ensure a consistent, visible gap (e.g. 16-20px) is applied via CSS Grid's `gap` property on the container — not via individual card margins, which can collapse or behave inconsistently. Verify no conflicting margin/border-collapse rule is neutralizing that gap.</fix_required>
     </issue>
     <issue id="2">
-      <cause>The primary KPI cards and the secondary "Resumo detalhado" cards use nearly identical visual treatment (same size, same font weight for values, same padding), so there's no hierarchy signaling "these are the headline numbers" vs "these are supporting detail" — everything reads as one flat wall of equally-important boxes.</cause>
-      <fix_required>Give the primary KPI row a visually heavier treatment (larger value typography, more internal padding, slightly more prominent card background/border) and keep the secondary "Resumo detalhado" row visually lighter/more compact — so the eye naturally lands on Investimento/Receita/Lucro/ROAS/ROI/CPA first, then the supporting detail below.</fix_required>
-    </issue>
-    <issue id="3">
-      <cause>After the two card rows, roughly half the page height is completely empty — there is no further content, chart, or visual element to use that space meaningfully, making the page feel unfinished.</cause>
-      <fix_required>Fill the remaining space with content that adds real analytical value: e.g. a compact trend chart (revenue/profit over time), a small comparison view (this period vs. last period), or a breakdown by traffic source — using real data from the existing summary object, not placeholder charts. If genuinely no historical data exists yet, replace the empty void with a well-designed empty state block (not just blank space) explaining what will appear there once data starts flowing.</fix_required>
-    </issue>
-    <issue id="4">
-      <cause>Card internal padding is minimal relative to the card's height, so label and value text sit close to the card borders, reinforcing the "squeezed" feeling even when column width is adequate.</cause>
-      <fix_required>Increase internal card padding and vertical spacing between label and value, and give each card a slightly taller minimum height so the content doesn't feel pressed against the edges.</fix_required>
+      <cause>The primary KPI grid uses `repeat(auto-fit, minmax(...), 1fr)`, so when the item count (5 cards: Investimento, Receita, Lucro Bruto, ROAS, ROI) doesn't evenly divide into the computed column count, the last item (CPA) wraps alone onto a new row and — because auto-fit stretches each column to 1fr — it either shrinks to a narrow orphaned box or leaves a large empty gap beside it, depending on how the browser resolves the remaining columns.</cause>
+      <fix_required>Either (a) set an explicit, fixed number of columns for this specific grid (not auto-fit) so the layout is predictable and the last row's item spans proportionally, or (b) use `grid-auto-flow: dense` combined with the orphaned item spanning multiple columns on its own row (e.g. `grid-column: span 2` or `span full-width` when it's the sole item in the last row), or (c) switch this specific KPI row to flexbox with `flex-wrap: wrap` and each card given a fixed `flex-basis` plus `flex-grow: 1`, so a lone last-row item still grows to fill the remaining row width instead of floating small with dead space beside it.</fix_required>
     </issue>
   </problem_diagnosis>
 
   <design_direction>
-    <principle>Grids should never sacrifice comfortable spacing to fit every item in one row — wrapping to multiple rows with generous padding always beats cramming everything into a single line.</principle>
-    <principle>Visual hierarchy between a "headline metrics" section and a "supporting detail" section must be expressed through typography scale, spacing, and card weight — not just section titles in text.</principle>
-    <principle>Empty space on a data page is a design failure, not a neutral outcome — every remaining area should either carry real analytical content or be replaced with an intentional, well-designed empty/loading state.</principle>
+    <principle>Every grid of cards must have a clearly visible, consistent gap between items — cards should always read as distinct, separate units, never as a single fused block.</principle>
+    <principle>A grid must handle non-even item counts gracefully: a lone item in the last row should either expand to a sensible width (not a narrow orphan) or the grid should reflow to keep rows visually balanced — never leave a large arbitrary empty gap next to a shrunken card.</principle>
   </design_direction>
 
   <component name="primary_kpi_grid">
-    <requirement>Change grid-template-columns to something like repeat(auto-fit, minmax(240px, 1fr)) combined with a max-width constraint per card (e.g. max-width: 320px) or an explicit column-count cap via container queries/media queries, so at most 3-4 cards sit per row on typical desktop widths, wrapping to a second row for the remaining ones.</requirement>
-    <requirement>Increase card min-height and internal padding; enlarge the value typography slightly relative to the current size to reinforce these as the page's headline numbers.</requirement>
+    <requirement>Replace the current auto-fit column logic with either a fixed column count per breakpoint (e.g. 4 columns on desktop, with the 5th item spanning the full remaining row width) or a flexbox row with flex-grow so the last card, when alone, expands proportionally instead of sitting small with empty space beside it.</requirement>
+    <requirement>Apply this same fix to the "Resumo detalhado" grid rows (6 items) if their count ever doesn't divide evenly into the chosen column count at a given breakpoint.</requirement>
   </component>
 
-  <component name="secondary_detail_grid">
-    <requirement>Apply the same column-capping logic (max 3-4 per row) but keep the visual weight lighter than the primary KPI cards — smaller value font size, tighter padding — to preserve hierarchy between the two rows.</requirement>
-  </component>
-
-  <component name="below_the_fold_content">
-    <requirement>Add a real content block below the two metric rows: a time-series chart (revenue/profit/spend trend) rendered from actual historical data if available, or a clearly designed "aguardando dados" empty state with an icon/illustration and a short explanation — filling the remaining vertical space intentionally rather than leaving it blank.</requirement>
+  <component name="card_grid_spacing">
+    <requirement>Set an explicit `gap` (16-20px) on every card grid container in the app (KPI row, resumo detalhado rows, and any other card grids like the connections page), and audit for any card-level margin or border-collapse rule that might be neutralizing it.</requirement>
+    <requirement>Verify the fix visually at common breakpoints (desktop wide, laptop, tablet) to confirm cards never touch and never leave a lone card looking orphaned or shrunken.</requirement>
   </component>
 
   <negative_prompt>
-    <avoid>Forcing all KPI cards into a single row regardless of viewport width</avoid>
-    <avoid>Identical visual weight between headline metrics and supporting detail metrics</avoid>
-    <avoid>Large blank areas at the bottom of a data-focused page with no content or designed empty state</avoid>
-    <avoid>Cards where padding is so tight that text touches or nearly touches the card border</avoid>
+    <avoid>Cards with zero or near-zero visible gap between them, reading as one fused block</avoid>
+    <avoid>A lone last-row card shrinking to its minimum width while empty space sits unused beside it</avoke>
   </negative_prompt>
 
   <deliverable_format>
-    <scope>CSS/layout fix for the Métricas page: grid column logic for both the primary KPI row and the "Resumo detalhado" row, increased card padding/hierarchy, and a real or well-designed empty-state component to fill the remaining page space. No backend/data changes required — this is a layout and information-hierarchy fix.</scope>
-  </deliverable_format>
-
-</layout_fix_brief>
-
-<layout_fix_brief project="TrackROI" screen="connections_page" target_agent="opencode">
-
-  <problem_diagnosis>
-    <issue id="1">
-      <cause>The `.connections-layout` grid uses default `align-items: stretch`, forcing every connection card to match the height of the tallest sibling. Meta Ads has rich content (upload zone, tags, table, two buttons) making it tall; Perfect Pay has almost no content (a connected email line and a sync timestamp), so it gets stretched into a mostly-empty box with its buttons floating awkwardly at the very bottom.</cause>
-      <fix_required>Change the grid to size each card to its own content (align-items: start / align-items: flex-start), so cards sit at natural, independent heights instead of being force-stretched to match the tallest one.</fix_required>
-    </issue>
-    <issue id="2">
-      <cause>A card with genuinely little content (a fully connected, healthy integration needing no action) currently looks broken/unfinished when placed next to a data-heavy card, because there's nothing designed to fill that visual space meaningfully.</cause>
-      <fix_required>Redesign the "connected and healthy" state of a connection card as a deliberately compact, self-contained summary (status, account identifier, last sync, a small health indicator/sparkline, and the two action buttons directly below the summary — no forced empty space). It should look intentionally minimal, not like a taller layout with missing content.</fix_required>
-    </issue>
-    <issue id="3">
-      <cause>The top "Atualize seus dados" hero banner has its step-progress indicator (✓ — ✓ with "Comece importando a planilha da Meta" caption) floating in the top-right corner, visually disconnected from the heading and body copy on the left — no shared baseline, no visual relationship between the two halves.</cause>
-      <fix_required>Redesign the hero banner as one coherent horizontal composition: heading + description on one side, and the step progress as a clearly-grouped unit (steps, connecting line, and a single caption directly under the steps) on the other, both vertically centered against each other with consistent padding — not appearing as two unrelated blocks sharing a box.</fix_required>
-    </issue>
-    <issue id="4">
-      <cause>The imported-reports table inside the Meta Ads card requires horizontal scrolling (visible scrollbar) because it has too many wide columns (DOS RELATÓRIOS, ENCERRAMENTO DOS RELATÓRIOS, NOME DA CAMPANHA, RESULTADOS) crammed into a card-width container.</cause>
-      <fix_required>Redesign this table for its actual container width: merge "Dos relatórios" and "Encerramento dos relatórios" into a single compact date-range column (e.g. "08/06 → 04/09/2026"), truncate long campaign names with an ellipsis and a tooltip/expand-on-click for the full name, and drop or right-align "Resultados" so all columns fit without a horizontal scrollbar at the card's default width.</fix_required>
-    </issue>
-    <issue id="5">
-      <cause>Button placement is inconsistent between the two cards: Meta Ads has "Importar dados" (filled) directly above "Testar importação" (ghost) right after the table; Perfect Pay has "Reconectar" (filled) and "Testar conexão" (ghost) side by side at the very bottom of a mostly empty card. There's no shared visual anchor point for actions across card types.</cause>
-      <fix_required>Establish one consistent action-bar pattern for every connection card, regardless of integration type or state: primary action (filled, purple) and secondary action (ghost) always sit inside a footer region with the same padding, alignment (side-by-side, left-aligned), and vertical position relative to the card's own content — never at a distance dictated by an unrelated sibling card's height.</fix_required>
-    </issue>
-  </problem_diagnosis>
-
-  <design_direction>
-    <principle>Every card must size itself to its own content. Visual balance between cards in the same row is achieved through consistent internal padding, typography scale, and a well-designed compact state — never through forcing equal container heights.</principle>
-    <principle>A "fully connected, no action needed" state is not an empty version of a "needs configuration" state — it is its own deliberately designed, confident, minimal state (think of how Stripe or Vercel show a healthy connected integration: compact, clear, calm, with a green accent and a couple of soft supporting metrics — not blank space).</principle>
-    <principle>Group visually related elements (a heading and its supporting UI, like the hero title and the step progress) so they read as one composition, not two separately-positioned blocks that happen to share a container.</principle>
-  </design_direction>
-
-  <component name="connections_grid">
-    <requirement>Set align-items: start (or flex-start if using flexbox) on the connections cards container so each card's height reflects only its own content.</requirement>
-    <requirement>If the height difference between adjacent cards is large, consider a masonry-style reflow on wider viewports so a short card doesn't leave a large empty column beneath it while a neighboring column continues.</requirement>
-  </component>
-
-  <component name="connection_card_connected_state">
-    <requirement>Redesign the "fully connected" card body as a compact status summary block: connected account (email/name), a green "healthy" indicator with the human-readable last-sync time, and — if data is available — a couple of small supporting stats (e.g. events received today, events failed) to give the space real informational value instead of leaving it blank.</requirement>
-    <requirement>Action buttons ("Reconectar" / "Testar conexão") sit directly beneath this summary block, not pinned to the bottom of an oversized container.</requirement>
-  </component>
-
-  <component name="connection_card_needs_import_state">
-    <requirement>Keep the CSV upload dropzone, file confirmation strip, and detected-fields tag row as-is structurally, but constrain the reports table to the card's actual width (see table fix below) so the card's total height stays proportionate rather than growing indefinitely with each additional imported report row shown.</requirement>
-    <requirement>Consider capping the visible table to the 3-5 most recent imports with a "Ver histórico completo" link/expand action, rather than growing the card height with every row.</requirement>
-  </component>
-
-  <component name="imported_reports_table">
-    <requirement>Merge date-range columns into one, truncate long campaign names with ellipsis + title attribute (or a click-to-expand tooltip), and ensure the column set fits the card's width at common breakpoints without a horizontal scrollbar.</requirement>
-  </component>
-
-  <component name="hero_banner">
-    <requirement>Rebuild as a single flex row: left side = heading + description (as now), right side = a self-contained step-progress unit where the numbered/checked circles, connecting line, and caption text are grouped together with consistent spacing and share a vertical center alignment with the left side's content — not floated independently in a corner.</requirement>
-  </component>
-
-  <negative_prompt>
-    <avoid>Equal-height stretched cards that create dead empty space in the shorter one</avoid>
-    <avoid>Any UI element positioned "because it landed there" rather than deliberately grouped with related content</avoid>
-    <avoid>Tables wider than their container requiring horizontal scroll at default viewport widths</avoid>
-    <avoid>Treating a "connected/healthy" integration state as a lesser or incomplete-looking version of the "needs setup" state</avoke>
-  </negative_prompt>
-
-  <deliverable_format>
-    <scope>CSS/layout fix for the Connections page only: grid alignment, connection-card internal structure for both "connected" and "needs action" states, the imported-reports table, and the hero banner composition. No backend logic changes required for this pass — purely visual/structural.</scope>
+    <scope>CSS-only fix: grid/flex logic and gap values for the Métricas page's KPI row and "Resumo detalhado" rows, applied consistently to any other card grid in the app with the same auto-fit pattern (e.g. Dashboard, Connections).</scope>
   </deliverable_format>
 
 </layout_fix_brief>

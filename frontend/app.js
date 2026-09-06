@@ -510,7 +510,14 @@ function mountResponsiveShell() {
 /* ------------------------------------------------------------- Data loading */
 
 const routeFetch = {
-  dashboard: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
+  dashboard: async () => {
+    const query = dashboardQuery();
+    const [dashboard, adsManager] = await Promise.all([
+      apiFetch(`/api/dashboard?${query}`),
+      apiFetch(`/api/meta/ads-campaigns?${query}`).catch(() => null),
+    ]);
+    return { ok: true, ...dashboard, adsManager };
+  },
   funnel: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
   metrics: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
   sales: async () => {
@@ -1118,10 +1125,223 @@ function dashboardPage(data) {
   const body = hasData
     ? `
       ${renderMetricCards(data.cards || [])}
+      ${adsManagerPanel(data.adsManager)}
       ${sectionPanel("Funil de conversão", `${periodLabel}${funnelSub}`, uvFunnelHtml(data.funnel))}
     `
     : emptyDashboard();
   return body;
+}
+
+const ADS_METRICS = [
+  ["spend", "Gasto", { render: (v) => money(v.spendCents) }],
+  ["reach", "Alcance", { render: (v) => nfFormat(v.reach) }],
+  ["impressions", "Impressões", { render: (v) => nfFormat(v.impressions) }],
+  ["clicks", "Cliques", { render: (v) => nfFormat(v.clicks) }],
+  ["ctr", "CTR", { render: (v) => (v.ctr != null ? `${(v.ctr * 100).toFixed(2).replace(".", ",")}%` : "—") }],
+  ["cpc", "CPC", { render: (v) => money(v.cpcCents) }],
+  ["cpm", "CPM", { render: (v) => money(v.cpmCents) }],
+  ["purchases", "Compras", { render: (v) => nfFormat(v.purchases) }],
+  ["revenue", "Receita", { render: (v) => money(v.revenueCents) }],
+  ["roas", "ROAS", { render: (v) => (v.roas ? Number(v.roas).toFixed(2).replace(".", ",") : "—") }],
+  ["costPerResult", "CPA", { render: (v) => (v.costPerResultCents ? money(v.costPerResultCents) : "—") }],
+];
+
+function loadAdsMetricChoice() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("trackroi_ads_metrics") || "null");
+    if (Array.isArray(saved) && saved.length) return saved;
+  } catch {
+    /* ignora */
+  }
+  return ["spend", "reach", "clicks", "purchases", "revenue", "roas"];
+}
+
+function saveAdsMetricChoice(keys) {
+  localStorage.setItem("trackroi_ads_metrics", JSON.stringify(keys));
+}
+
+function adsMetricLabel(key) {
+  const found = ADS_METRICS.find((m) => m[0] === key);
+  return found ? found[1] : key;
+}
+
+function adsManagerPanel(manager) {
+  if (!manager) return "";
+  const connected = manager.connected === true;
+  if (!connected) {
+    return sectionPanel(
+      "Campanhas",
+      "Conecte a Meta Ads em Conexões para ver suas campanhas, conjuntos e anúncios aqui.",
+      `
+        <div class="empty-state">
+          Meta Ads ainda não está conectado.
+          <a class="btn-ghost" href="#connections" style="display:inline-block;margin-top:12px;">Conectar Meta Ads</a>
+        </div>
+      `
+    );
+  }
+  const campaigns = manager.campaigns || [];
+  if (!campaigns.length) {
+    return sectionPanel("Campanhas", "Sincronize sua conta da Meta Ads para carregar as campanhas.", `
+      <div class="empty-state">Nenhuma campanha encontrada na sua conta da Meta Ads.</div>
+    `);
+  }
+  const chosen = loadAdsMetricChoice();
+  const metricPicker = `
+    <label class="select-wrap">
+      <span>Métricas</span>
+      <select id="ads-metric-picker" multiple size="6">
+        ${ADS_METRICS.map(([key, label]) => `<option value="${key}" ${chosen.includes(key) ? "selected" : ""}>${label}</option>`).join("")}
+      </select>
+    </label>
+  `;
+  const nActive = campaigns.filter((c) => activeStatus(c.effectiveStatus)).length;
+  const nInactive = campaigns.length - nActive;
+  const counts = `
+    <div class="ads-counts">
+      <span class="ads-count ok">${nActive} ativa${nActive === 1 ? "" : "s"}</span>
+      <span class="ads-count off">${nInactive} desativada${nInactive === 1 ? "" : "s"}</span>
+      <span class="ads-count">${campaigns.length} total</span>
+    </div>
+  `;
+  const body = `
+    <div class="ads-toolbar">${counts}${metricPicker}</div>
+    <div class="table-wrap">
+      <table id="ads-campaigns-table">
+        <thead>
+          <tr>
+            <th>Campanha</th>
+            <th>Status</th>
+            <th>Objetivo</th>
+            <th>Orçamento</th>
+            ${chosen.map((key) => `<th data-metric="${key}">${adsMetricLabel(key)}</th>`).join("")}
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${campaigns.map((camp) => adsCampaignRow(camp, chosen, manager)).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  return sectionPanel("Campanhas", `${manager.account} · ${fmtRange(manager.since, manager.until)}`, body);
+}
+
+function activeStatus(status) {
+  return status === "ACTIVE" || status === "ACTIVE_STATUS";
+}
+
+function nfFormat(value) {
+  if (value == null) return "—";
+  return new Intl.NumberFormat("pt-BR").format(Number(value) || 0);
+}
+
+function fmtRange(since, until) {
+  const fmt = (iso) => {
+    if (!iso) return "";
+    const d = new Date(`${iso}T12:00:00Z`);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  };
+  return `${fmt(since)} – ${fmt(until)}`;
+}
+
+function adsStatusPill(status) {
+  const active = status === "ACTIVE";
+  const paused = status === "PAUSED";
+  const arch = status === "ARCHIVED";
+  const label = active ? "Ativa" : paused ? "Pausada" : arch ? "Arquivada" : status ? status.toLowerCase() : "—";
+  const tone = active ? "ok" : paused ? "warn" : "off";
+  return `<span class="status-pill ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function budgetText(camp) {
+  if (camp.dailyBudgetCents > 0) return `R$ ${nfFormat(camp.dailyBudgetCents / 100)}/dia`;
+  if (camp.lifetimeBudgetCents > 0) return `R$ ${nfFormat(camp.lifetimeBudgetCents / 100)} total`;
+  return "—";
+}
+
+function adsCampaignRow(camp, chosen, manager) {
+  const inherited = manager.adsets.filter((a) => a.campaignId === camp.id);
+  const activeAds = manager.ads.filter((a) => a.campaignId === camp.id && a.effectiveStatus === "ACTIVE");
+  const insights = camp.insights || null;
+  const metricCells = chosen.map((key) => {
+    const metric = ADS_METRICS.find((m) => m[0] === key);
+    if (!metric) return "<td>—</td>";
+    const value = insights ? metric[2].render(insights) : "—";
+    return `<td data-metric-cell="${key}">${value}</td>`;
+  }).join("");
+  const activeCount = inherited.filter((a) => a.effectiveStatus === "ACTIVE").length;
+  const totalAds = manager.ads.filter((a) => a.campaignId === camp.id).length;
+  const summary = `${inherited.length} ${inherited.length === 1 ? "conjunto" : "conjuntos"} · ${activeCount} ativo${activeCount === 1 ? "" : "s"} · ${activeAds.length} anúncio${activeAds.length === 1 ? "" : "s"} ativo${activeAds.length === 1 ? "" : "s"} (${totalAds})`;
+  return `
+    <tr class="ads-campaign-row" data-campaign="${escapeHtml(camp.id)}">
+      <td>
+        <div class="ads-name">${escapeHtml(camp.name || "Sem nome")}</div>
+        <div class="ads-sub">${escapeHtml(summary)}</div>
+      </td>
+      <td>${adsStatusPill(camp.effectiveStatus || camp.status)}</td>
+      <td>${escapeHtml(camp.objective || "—")}</td>
+      <td>${budgetText(camp)}</td>
+      ${metricCells}
+      <td><button type="button" class="ghost ads-expand" aria-expanded="false">Detalhes</button></td>
+    </tr>
+    <tr class="ads-detail-row" data-detail="${escapeHtml(camp.id)}" hidden>
+      <td colspan="${4 + chosen.length + 1}">
+        ${adsDetail(camp, manager)}
+      </td>
+    </tr>
+  `;
+}
+
+function adsDetail(camp, manager) {
+  const adsets = manager.adsets.filter((a) => a.campaignId === camp.id);
+  const ads = manager.ads.filter((a) => a.campaignId === camp.id);
+  const groupedAds = adsets.map((adset) => {
+    const adsetAds = ads.filter((a) => a.adsetId === adset.id);
+    return { adset, ads: adsetAds };
+  });
+  const orphanAds = ads.filter((a) => !adsets.some((s) => s.id === a.adsetId));
+  const activeAdsDuration = camp.startTime && camp.stopTime
+    ? ` · ${fmtRange(camp.startTime.slice(0, 10), camp.stopTime.slice(0, 10))}`
+    : "";
+  const adsetRows = groupedAds.map(({ adset, ads: setAds }) => `
+    <div class="ads-subblock">
+      <div class="ads-subblock-head">
+        <span class="ads-subblock-title"><strong>${escapeHtml(adset.name || "Conjunto sem nome")}</strong></span>
+        ${adsStatusPill(adset.effectiveStatus || adset.status)}
+        <span class="ads-budget">${budgetText(adset)}</span>
+      </div>
+      ${setAds.length ? `
+        <ul class="ads-sub-list">
+          ${setAds.map((a) => `
+            <li>
+              <span class="ads-sub-item-name">${escapeHtml(a.name || "Anúncio sem nome")}</span>
+              ${adsStatusPill(a.effectiveStatus || a.status)}
+            </li>
+          `).join("")}
+        </ul>
+      ` : '<div class="ads-sub-empty">Nenhum anúncio neste conjunto.</div>'}
+    </div>
+  `).join("");
+  const orphanRows = orphanAds.length ? `
+    <div class="ads-subblock">
+      <div class="ads-subblock-head"><span class="ads-subblock-title"><strong>Anúncios sem conjunto</strong></span></div>
+      <ul class="ads-sub-list">${orphanAds.map((a) => `<li><span class="ads-sub-item-name">${escapeHtml(a.name || "—")}</span>${adsStatusPill(a.effectiveStatus || a.status)}</li>`).join("")}</ul>
+    </div>
+  ` : "";
+  return `
+    <div class="ads-detail-inner">
+      <div class="ads-detail-meta">
+        <div><span class="ads-detail-label">ID</span><span>${escapeHtml(camp.id)}</span></div>
+        <div><span class="ads-detail-label">Orçamento diário</span><span>${camp.dailyBudgetCents > 0 ? money(camp.dailyBudgetCents) : "—"}</span></div>
+        <div><span class="ads-detail-label">Orçamento vitalício</span><span>${camp.lifetimeBudgetCents > 0 ? money(camp.lifetimeBudgetCents) : "—"}</span></div>
+        <div><span class="ads-detail-label">Restante</span><span>${camp.remainingBudgetCents != null ? money(camp.remainingBudgetCents) : "—"}</span></div>
+        <div><span class="ads-detail-label">Período</span><span>${(camp.startTime || "—").slice(0, 10)}${activeAdsDuration}</span></div>
+      </div>
+      ${adsetRows}
+      ${orphanRows}
+    </div>
+  `;
 }
 
 function salesTable(items) {
@@ -2017,6 +2237,28 @@ function attachPageHandlers() {
 
   const mobileRefresh = el("mobile-refresh-button");
   if (mobileRefresh) mobileRefresh.onclick = () => loadData(state.route);
+
+  document.querySelectorAll(".ads-expand").forEach((button) => {
+    button.onclick = () => {
+      const row = button.closest("tr");
+      const id = row ? row.dataset.campaign : null;
+      const detail = id ? document.querySelector(`tr[data-detail="${CSS.escape(id)}"]`) : null;
+      if (!detail) return;
+      const open = detail.hidden;
+      detail.hidden = !open;
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      button.textContent = open ? "Recolher" : "Detalhes";
+    };
+  });
+
+  const adsMetricPicker = el("ads-metric-picker");
+  if (adsMetricPicker) {
+    adsMetricPicker.onchange = () => {
+      const keys = Array.from(adsMetricPicker.selectedOptions).map((o) => o.value);
+      saveAdsMetricChoice(keys);
+      loadData(state.route);
+    };
+  }
 
   const mobileSave = el("mobile-save-settings-button");
   if (mobileSave) {

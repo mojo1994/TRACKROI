@@ -845,6 +845,61 @@ async function handleMetaSync(req, res, user, dashboardId) {
   send(res, 200, { ok: true, account: selected.name, days: dateTags.size, spendCents: importedSpend, clicks: importedClicks }, {}, req);
 }
 
+async function handleMetaAdsManager(req, res, user, dashboardId, query) {
+  const provider = providers.get("meta");
+  const integration = db.getIntegration("meta", dashboardId);
+  const token = integration?.accessToken ? decryptSecret(integration.accessToken) : null;
+  if (!token) {
+    send(res, 200, { ok: true, connected: false, campaigns: [], adsets: [], ads: [] }, {}, req);
+    return;
+  }
+  const storedId = String(integration?.adAccountId || "").trim().replace(/^act_/, "");
+  let accountId = storedId;
+  if (!accountId) {
+    try {
+      const accounts = await provider.listAdAccounts(token);
+      const selected = accounts[0];
+      if (!selected) {
+        send(res, 200, { ok: true, connected: false, campaigns: [], adsets: [], ads: [] }, {}, req);
+        return;
+      }
+      accountId = String(selected.accountId || "").replace(/^act_/, "");
+    } catch (error) {
+      logger.error("Meta ad account lookup failed", { error: error.message });
+      send(res, 502, { ok: false, error: friendlyProviderError("meta", error), retryable: true }, {}, req);
+      return;
+    }
+  }
+  if (!accountId) {
+    send(res, 200, { ok: true, connected: false, campaigns: [], adsets: [], ads: [] }, {}, req);
+    return;
+  }
+
+  const period = resolvePeriod(query);
+  const since = query.from || period.from.slice(0, 10);
+  const until = query.to || period.to.slice(0, 10);
+
+  let manager;
+  try {
+    manager = await provider.fetchAdsManager(token, accountId, { since, until });
+  } catch (error) {
+    logger.error("Meta ads manager fetch failed", { error: error.message });
+    send(res, 502, { ok: false, error: friendlyProviderError("meta", error), retryable: true }, {}, req);
+    return;
+  }
+
+  send(res, 200, {
+    ok: true,
+    connected: true,
+    account: integration?.connectedAccount || "Meta Ads",
+    since: manager.since,
+    until: manager.until,
+    campaigns: manager.campaigns,
+    adsets: manager.adsets,
+    ads: manager.ads,
+  }, {}, req);
+}
+
 async function handleIntegrationHealth(req, res, match, dashboardId) {
   const provider = providers.get(match[1]);
   if (!provider) {
@@ -1863,6 +1918,12 @@ async function main() {
       if (req.method === "POST" && pathname === "/api/integrations/meta/sync") {
         const dashboardId = resolveDashboardId(auth, req);
         await handleMetaSync(req, res, auth.user, dashboardId);
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/meta/ads-campaigns") {
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleMetaAdsManager(req, res, auth.user, dashboardId, query);
         return;
       }
 

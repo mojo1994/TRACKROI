@@ -18,6 +18,18 @@ function env() {
   };
 }
 
+function extractActionCount(actions, actionType) {
+  if (!Array.isArray(actions)) return 0;
+  const match = actions.find((a) => a.action_type === actionType || (a.action_type && a.action_type.includes("purchase")));
+  return match ? Math.round(Number(match.value || 0)) : 0;
+}
+
+function extractActionValue(actionValues, actionType) {
+  if (!Array.isArray(actionValues)) return 0;
+  const match = actionValues.find((a) => a.action_type === actionType || (a.action_type && a.action_type.includes("purchase")));
+  return match ? Number(match.value || 0) : 0;
+}
+
 const provider = {
   id: "meta",
   displayName: "Meta Ads",
@@ -140,6 +152,116 @@ const provider = {
         currency: item.currency,
         status: item.account_status,
       }));
+  },
+
+  async fetchAdsManager(token, adAccountId, { since, until } = {}) {
+    const c = env();
+    const cleanId = String(adAccountId || "").replace(/\s+/g, "").replace(/^act_/, "");
+    if (!cleanId) throw new Error("Nenhuma conta de anúncio definida.");
+    const end = until || new Date().toISOString().slice(0, 10);
+    const start = since || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const timeRange = JSON.stringify({ since: start, until: end });
+
+    async function paginatedGet(url, limit = 500) {
+      const results = [];
+      let next = url;
+      for (let page = 0; page < 10 && next; page += 1) {
+        const response = await fetch(next);
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(body.error?.message || "A Meta recusou a consulta.");
+          error.retryable = true;
+          throw error;
+        }
+        results.push(...(body.data || []));
+        next = body.paging?.next ? new URL(body.paging.next) : null;
+      }
+      return results;
+    }
+
+    const campaignListUrl = new URL(`https://graph.facebook.com/${c.apiVersion}/act_${cleanId}/campaigns`);
+    campaignListUrl.searchParams.set("fields", "id,name,status,effective_status,objective,daily_budget,lifetime_budget,remaining_budget,start_time,stop_time");
+    campaignListUrl.searchParams.set("limit", "500");
+    campaignListUrl.searchParams.set("access_token", token);
+    const campaignRows = await paginatedGet(campaignListUrl);
+
+    const insightsUrl = new URL(`https://graph.facebook.com/${c.apiVersion}/act_${cleanId}/insights`);
+    insightsUrl.searchParams.set("level", "campaign");
+    insightsUrl.searchParams.set("fields", "campaign_id,campaign_name,spend,impressions,clicks,cpc,ctr,cpm,reach,actions,action_values,purchase_roas,cost_per_result_type,result_type");
+    insightsUrl.searchParams.set("time_range", timeRange);
+    insightsUrl.searchParams.set("limit", "500");
+    insightsUrl.searchParams.set("access_token", token);
+    const insightRows = await paginatedGet(insightsUrl);
+
+    const adsetUrl = new URL(`https://graph.facebook.com/${c.apiVersion}/act_${cleanId}/adsets`);
+    adsetUrl.searchParams.set("fields", "id,name,status,effective_status,campaign_id,daily_budget,lifetime_budget");
+    adsetUrl.searchParams.set("limit", "500");
+    adsetUrl.searchParams.set("access_token", token);
+    const adsetRows = await paginatedGet(adsetUrl);
+
+    const adsUrl = new URL(`https://graph.facebook.com/${c.apiVersion}/act_${cleanId}/ads`);
+    adsUrl.searchParams.set("fields", "id,name,status,effective_status,adset_id,campaign_id");
+    adsUrl.searchParams.set("limit", "500");
+    adsUrl.searchParams.set("access_token", token);
+    const adRows = await paginatedGet(adsUrl);
+
+    const insightsMap = {};
+    for (const row of insightRows) {
+      const cid = row.campaign_id;
+      if (!cid) continue;
+      const purchases = extractActionCount(row.actions, "offsite_conversion.fb_pixel_purchase");
+      const purchaseValue = extractActionValue(row.action_values, "offsite_conversion.fb_pixel_purchase");
+      const revenueCents = Math.round(Number(purchaseValue || 0) * 100);
+      const spendCents = Math.round(Number(row.spend || 0) * 100);
+      insightsMap[cid] = {
+        spendCents,
+        impressions: Math.round(Number(row.impressions || 0)),
+        clicks: Math.round(Number(row.clicks || 0)),
+        cpcCents: Math.round(Number(row.cpc || 0) * 100),
+        ctr: Number(row.ctr || 0),
+        cpmCents: Math.round(Number(row.cpm || 0) * 100),
+        reach: Math.round(Number(row.reach || 0)),
+        purchases,
+        revenueCents,
+        roas: Number(row.purchase_roas) || 0,
+        costPerResultCents: purchases > 0 ? Math.round(spendCents / purchases) : 0,
+      };
+    }
+
+    const campaigns = campaignRows.map((camp) => ({
+      id: camp.id,
+      name: camp.name || "",
+      status: camp.status || "",
+      effectiveStatus: camp.effective_status || "",
+      objective: camp.objective || "",
+      dailyBudgetCents: Math.round(Number(camp.daily_budget || 0)),
+      lifetimeBudgetCents: Math.round(Number(camp.lifetime_budget || 0)),
+      remainingBudgetCents: camp.remaining_budget != null ? Math.round(Number(camp.remaining_budget)) : null,
+      startTime: camp.start_time || null,
+      stopTime: camp.stop_time || null,
+      insights: insightsMap[camp.id] || null,
+    }));
+
+    const adsets = adsetRows.map((a) => ({
+      id: a.id,
+      name: a.name || "",
+      status: a.status || "",
+      effectiveStatus: a.effective_status || "",
+      campaignId: a.campaign_id || "",
+      dailyBudgetCents: Math.round(Number(a.daily_budget || 0)),
+      lifetimeBudgetCents: Math.round(Number(a.lifetime_budget || 0)),
+    }));
+
+    const ads = adRows.map((a) => ({
+      id: a.id,
+      name: a.name || "",
+      status: a.status || "",
+      effectiveStatus: a.effective_status || "",
+      adsetId: a.adset_id || "",
+      campaignId: a.campaign_id || "",
+    }));
+
+    return { campaigns, adsets, ads, since: start, until: end };
   },
 
   async fetchDailyInsights(token, adAccountId, { since, until } = {}) {

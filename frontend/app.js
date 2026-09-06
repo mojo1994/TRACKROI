@@ -760,7 +760,7 @@ function renderMetricCards(cards) {
       ${cards
         .map((card) => {
           const toneClass = card.tone === "positive" ? "positive" : card.tone === "negative" ? "negative" : "";
-          const hint = card.hint ? `<div class="metric-hint">${escapeHtml(card.hint)}</div>` : "";
+          const hint = card.hint ? `<div class="metric-hint" title="${escapeHtml(card.hint)}">${escapeHtml(card.hint)}</div>` : "";
           return `
             <article class="metric-card" data-card="${escapeHtml(card.key)}">
               <div class="metric-label">${escapeHtml(card.label)}</div>
@@ -882,7 +882,9 @@ function uvFunnelHtml(funnel) {
     .join("");
 
   const nf = new Intl.NumberFormat("pt-BR");
-  const legendCols = `${(pad / W) * 100}%${stages.map(() => ` ${(dx / W) * 100}%`).join("")} ${(pad / W) * 100}%`;
+  const padPct = (pad / W) * 100;
+  const innerPct = (100 - padPct * 2) / n;
+  const legendCols = `${padPct.toFixed(3)}%${stages.map(() => ` ${innerPct.toFixed(3)}%`).join("")} ${padPct.toFixed(3)}%`;
   const legend = `
     <ol class="uv-legend" style="grid-template-columns:${legendCols}">
       ${stages

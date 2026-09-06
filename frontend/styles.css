@@ -384,6 +384,13 @@ a {
   align-content: start;
 }
 
+#page-root {
+  display: grid;
+  gap: 26px;
+  align-content: start;
+  min-width: 0;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
@@ -900,7 +907,7 @@ button.ghost:hover {
 .uv-legend {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
+  gap: 0;
   list-style: none;
   margin: 10px 0 0;
   padding: 0;
@@ -909,6 +916,7 @@ button.ghost:hover {
 .uv-item {
   position: relative;
   min-width: 0;
+  padding-inline: 6px;
 }
 
 .uv-item span {

@@ -917,6 +917,10 @@ function updateIntegrationField(providerId, field, value, dashboardId) {
   return current;
 }
 
+function clearIntegration(providerId, dashboardId) {
+  run("DELETE FROM integrations WHERE provider_id = ? AND dashboard_id = ?", [providerId, String(dashboardId || "").trim()]);
+}
+
 /* ------------------------------------------------------------- Settings */
 
 function settingsKey(dashboardId) {
@@ -1203,6 +1207,7 @@ module.exports = {
   listIntegrations,
   listDashboardsWithIntegration,
   updateIntegrationField,
+  clearIntegration,
   setSettings,
   getSettings,
   createCsrfToken,

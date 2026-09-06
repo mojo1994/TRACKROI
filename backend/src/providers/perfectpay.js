@@ -10,6 +10,26 @@ function verifyHmac(rawBody, signatureHeader, secret) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const STATUS_ENUM_MAP = {
+  0: "none",
+  1: "pending",
+  2: "approved",
+  3: "in_process",
+  4: "in_mediation",
+  5: "rejected",
+  6: "cancelled",
+  7: "refunded",
+  8: "authorized",
+  9: "chargeback",
+  10: "completed",
+  11: "checkout_error",
+  12: "precheckout",
+  13: "expired",
+  16: "in_review",
+};
+
+const CHECKOUT_EVENTS = new Set(["initiated", "precheckout", "checkout_error", "expired"]);
+
 const provider = {
   id: "perfectpay",
   displayName: "Perfect Pay",
@@ -63,12 +83,50 @@ const provider = {
     return verifyHmac(rawBody, signatureHeader, secret);
   },
 
+  verifyWebhookToken(payload, expectedToken) {
+    if (!expectedToken) return false;
+    const received = String(payload?.token || "").trim();
+    if (!received) return false;
+    return received === String(expectedToken).trim();
+  },
+
+  isCheckoutEvent(eventType) {
+    return CHECKOUT_EVENTS.has(String(eventType || "").toLowerCase());
+  },
+
   normalizeWebhookEvent(payload) {
+    const hasNativeFormat =
+      payload && (payload.sale_status_enum !== undefined || payload.code !== undefined || payload.webhook_owner !== undefined);
+    if (hasNativeFormat) {
+      const enumValue = Number(payload.sale_status_enum);
+      let eventType = STATUS_ENUM_MAP[enumValue] || "none";
+      const detail = String(payload.sale_status_detail || "").toLowerCase();
+      if (enumValue === 0 && /checkout|saved|created|initiated/.test(detail)) {
+        eventType = "initiated";
+      }
+      const metadata = payload.metadata || {};
+      return {
+        transactionId: String(payload.code || "").trim(),
+        eventType,
+        isCheckout: CHECKOUT_EVENTS.has(eventType),
+        amountCents: Math.round(Number(payload.sale_amount || 0) * 100),
+        currency: "BRL",
+        quantity: Number(payload.quantity || 1),
+        trackroiClickId: String(metadata.src || metadata.trackroi_click_id || metadata.click_id || "").trim() || null,
+        webhookOwner: String(payload.webhook_owner || "").trim() || null,
+        customer: payload.customer || null,
+        product: payload.product || null,
+        plan: payload.plan || null,
+        dateCreated: payload.date_created || null,
+        dateApproved: payload.date_approved || null,
+      };
+    }
     const transactionId = String(payload?.transaction_id || payload?.transactionId || payload?.id || "").trim();
     const eventType = String(payload?.event_type || payload?.eventType || payload?.event || "").trim().toLowerCase();
     return {
       transactionId,
       eventType,
+      isCheckout: CHECKOUT_EVENTS.has(eventType),
       amountCents: Number(payload?.amount_cents ?? payload?.amountCents ?? 0),
       currency: String(payload?.currency || "BRL").toUpperCase(),
       trackroiClickId: String(payload?.trackroi_click_id || payload?.click_id || "").trim() || null,
@@ -79,7 +137,7 @@ const provider = {
     return "not_connected";
   },
 
-  writableFields: ["status", "webhookUrl", "webhookStatus", "apiStatus"],
+  writableFields: ["status", "webhookUrl", "webhookStatus", "apiStatus", "webhookToken"],
 };
 
 module.exports = provider;

@@ -543,7 +543,17 @@ async function handlePerfectPaySubmit(req, res) {
 
 /* ------------------------------------------------------------- Integrations */
 
-const SECRET_FIELDS = new Set(["accessToken", "webhookSecret", "access_token", "webhook_secret"]);
+const SECRET_FIELDS = new Set(["accessToken", "webhookSecret", "webhookToken", "access_token", "webhook_secret"]);
+
+function webhookPublicOrigin() {
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  if (process.env.FRONTEND_ORIGIN) return String(process.env.FRONTEND_ORIGIN).replace(/\/+$/, "");
+  return `http://localhost:${process.env.PORT || 4100}`;
+}
+
+function defaultPerfectPayWebhookUrl(dashboardId) {
+  return `${webhookPublicOrigin()}/api/webhooks/perfectpay?dash=${encodeURIComponent(String(dashboardId || "").trim())}`;
+}
 
 function publicIntegration(provider, dashboardId) {
   const data = db.getIntegration(provider.id, dashboardId);
@@ -552,6 +562,9 @@ function publicIntegration(provider, dashboardId) {
   for (const [key, value] of Object.entries(data)) {
     if (SECRET_FIELDS.has(key)) continue;
     safe[key] = value;
+  }
+  if (provider.id === "perfectpay" && !data.webhookUrl) {
+    safe.webhookUrl = defaultPerfectPayWebhookUrl(dashboardId);
   }
   return {
     id: provider.id,
@@ -715,8 +728,8 @@ async function handleIntegrationUpdate(req, res, match, user, dashboardId) {
   const allowed = new Set(provider.writableFields || []);
   for (const [key, value] of Object.entries(body || {})) {
     if (!allowed.has(key)) continue;
-    if (key === "webhookSecret" && typeof value === "string" && value) {
-      current.webhookSecret = encryptSecret(value);
+    if ((key === "webhookSecret" || key === "webhookToken") && typeof value === "string" && value) {
+      current[key] = encryptSecret(value);
     } else {
       current[key] = value;
     }
@@ -732,6 +745,23 @@ async function handleIntegrationUpdate(req, res, match, user, dashboardId) {
   });
   broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user.id);
   send(res, 200, { ok: true, item: publicIntegration(provider) }, {}, req);
+}
+
+async function handleIntegrationDisconnect(req, res, match, user, dashboardId) {
+  const provider = providers.get(match[1]);
+  if (!provider) {
+    send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
+    return;
+  }
+  db.clearIntegration(provider.id, dashboardId);
+  db.appendAuditLog({
+    actorUserId: user.id,
+    action: `integration.${provider.id}.disconnected`,
+    resourceType: "integration",
+    resourceId: provider.id,
+  });
+  broadcastSSE({ type: "data", changed: ["integrations"], dashboardId }, user.id);
+  send(res, 200, { ok: true, provider: provider.id }, {}, req);
 }
 
 /* ------------------------------------------------------------- Import CSV */
@@ -1012,13 +1042,22 @@ async function handlePerfectPayWebhook(req, res) {
   const event = provider.normalizeWebhookEvent(body);
 
   let dashboardId = "";
+  const query = getQuery(req.url);
+  const qDash = String(query.dash || query.dashboard_id || "").trim();
+  if (qDash && db.getDashboard(qDash)) {
+    const qIntegration = db.getIntegration("perfectpay", qDash);
+    if (qIntegration.updated_at) {
+      dashboardId = qDash;
+    }
+  }
+
   const dashboardsWithPp = db.listDashboardsWithIntegration("perfectpay");
   const connectedOnes = dashboardsWithPp.filter((entry) => {
     const data = db.getIntegration("perfectpay", entry.dashboardId);
     return data.status === "connected" || data.connected === true || data.apiStatus === "connected";
   });
 
-  if (event.trackroiClickId) {
+  if (!dashboardId && event.trackroiClickId) {
     dashboardId = db.findClickDashboardByTrackroiId(event.trackroiClickId) || "";
   }
   if (!dashboardId && connectedOnes.length === 1) {
@@ -1035,25 +1074,51 @@ async function handlePerfectPayWebhook(req, res) {
     return;
   }
 
-  const dashOwner = connectedOnes.find((entry) => entry.dashboardId === dashboardId) || dashboardsWithPp.find((entry) => entry.dashboardId === dashboardId);
+  const findOwner = () => {
+    const fromList = connectedOnes.find((entry) => entry.dashboardId === dashboardId) || dashboardsWithPp.find((entry) => entry.dashboardId === dashboardId);
+    if (fromList) return fromList;
+    const dash = db.getDashboard(dashboardId);
+    return dash ? { dashboardId, owner_id: dash.owner_id } : null;
+  };
+  const dashOwner = findOwner();
+
   const integration = db.getIntegration("perfectpay", dashboardId);
-  const secret = integration.webhookSecret ? decryptSecret(integration.webhookSecret) : (integration.webhookSecret || "");
-  if (secret) {
-    const valid = provider.verifyWebhookSignature(raw, req.headers, secret);
-    if (!valid) {
+  const webhookToken = integration.webhookToken ? decryptSecret(integration.webhookToken) : "";
+  if (webhookToken) {
+    if (!provider.verifyWebhookToken(body, webhookToken)) {
       db.appendAuditLog({
         actorUserId: dashOwner?.owner_id || null,
-        action: "webhook.invalid_signature",
+        action: "webhook.invalid_token",
         resourceType: "webhook_event",
         resourceId: db.makeId("we"),
-        metadata: { reason: "signature_mismatch", dashboardId },
+        metadata: { reason: "token_mismatch", dashboardId },
       });
-      send(res, 401, { ok: false, error: "Invalid signature" }, {}, req);
+      send(res, 401, { ok: false, error: "Invalid webhook token" }, {}, req);
       return;
+    }
+  } else {
+    const secret = integration.webhookSecret ? decryptSecret(integration.webhookSecret) : (integration.webhookSecret || "");
+    if (secret) {
+      const valid = provider.verifyWebhookSignature(raw, req.headers, secret);
+      if (!valid) {
+        db.appendAuditLog({
+          actorUserId: dashOwner?.owner_id || null,
+          action: "webhook.invalid_signature",
+          resourceType: "webhook_event",
+          resourceId: db.makeId("we"),
+          metadata: { reason: "signature_mismatch", dashboardId },
+        });
+        send(res, 401, { ok: false, error: "Invalid signature" }, {}, req);
+        return;
+      }
     }
   }
 
-  const supportedEvents = new Set(["approved", "pending", "refunded", "chargeback", "cancelled", "rejected"]);
+  const supportedEvents = new Set([
+    "approved", "pending", "refunded", "chargeback", "cancelled", "rejected",
+    "authorized", "completed", "in_process", "in_mediation", "in_review",
+    "initiated", "precheckout", "checkout_error", "expired",
+  ]);
   if (!event.transactionId || !event.eventType) {
     send(res, 400, { ok: false, error: "transaction_id and event_type are required" }, {}, req);
     return;
@@ -1081,20 +1146,46 @@ async function handlePerfectPayWebhook(req, res) {
     return;
   }
 
-  const source = event.trackroiClickId ? "direct" : "meta";
-  db.upsertSale({
-    gateway: "perfectpay",
-    gatewayTransactionId: event.transactionId,
-    eventType: event.eventType,
-    status: event.eventType,
-    amountCents: Number.isFinite(event.amountCents) ? event.amountCents : 0,
-    currency: event.currency,
-    trackroiClickId: event.trackroiClickId,
-    source,
-    dashboardId,
-    createdAt: receivedAt,
-    updatedAt: receivedAt,
-  });
+  if (event.isCheckout) {
+    db.createCheckout({
+      dashboardId,
+      trackroiClickId: event.trackroiClickId || "",
+      status: event.eventType,
+    });
+    db.appendAuditLog({
+      actorUserId: dashOwner?.owner_id || null,
+      action: "checkout.received",
+      resourceType: "checkout",
+      resourceId: db.makeId("co"),
+      metadata: { eventType: event.eventType, transactionId: event.transactionId, duplicate: false, dashboardId },
+    });
+  } else {
+    const source = event.trackroiClickId ? "direct" : "meta";
+    const saleAt = event.dateApproved || event.dateCreated || receivedAt;
+    db.upsertSale({
+      gateway: "perfectpay",
+      gatewayTransactionId: event.transactionId,
+      eventType: event.eventType,
+      status: event.eventType,
+      amountCents: Number.isFinite(event.amountCents) ? event.amountCents : 0,
+      currency: event.currency,
+      trackroiClickId: event.trackroiClickId,
+      source,
+      dashboardId,
+      createdAt: saleAt,
+      updatedAt: receivedAt,
+    });
+    if (event.eventType === "approved") {
+      db.appendAuditLog({
+        actorUserId: dashOwner?.owner_id || null,
+        action: "sale.approved",
+        resourceType: "sale",
+        resourceId: db.makeId("sa"),
+        metadata: { amountCents: event.amountCents, currency: event.currency },
+      });
+    }
+  }
+
   db.updateIntegrationField("perfectpay", "lastReceivedEventAt", receivedAt, dashboardId);
   db.appendAuditLog({
     actorUserId: dashOwner?.owner_id || null,
@@ -1103,15 +1194,6 @@ async function handlePerfectPayWebhook(req, res) {
     resourceId: db.makeId("we"),
     metadata: { eventType: event.eventType, transactionId: event.transactionId, duplicate: false, dashboardId },
   });
-  if (event.eventType === "approved") {
-    db.appendAuditLog({
-      actorUserId: dashOwner?.owner_id || null,
-      action: "sale.approved",
-      resourceType: "sale",
-      resourceId: db.makeId("sa"),
-      metadata: { amountCents: event.amountCents, currency: event.currency },
-    });
-  }
   broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "logs", "integrations"], dashboardId }, dashOwner?.owner_id || null);
   send(res, 200, { ok: true, duplicate: false, idempotency_key: idempotencyKey, sale_status: event.eventType }, {}, req);
 }
@@ -1381,6 +1463,11 @@ async function main() {
       if (req.method === "PUT" && integrationUpdateMatch) {
         const dashboardId = resolveDashboardId(auth, req);
         await handleIntegrationUpdate(req, res, integrationUpdateMatch, auth.user, dashboardId);
+        return;
+      }
+      if (req.method === "DELETE" && integrationUpdateMatch) {
+        const dashboardId = resolveDashboardId(auth, req);
+        await handleIntegrationDisconnect(req, res, integrationUpdateMatch, auth.user, dashboardId);
         return;
       }
 

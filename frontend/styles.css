@@ -1286,6 +1286,33 @@ td {
   border-top: 1px solid var(--hairline-faint);
 }
 
+.ghost.danger {
+  color: #c0392b;
+  border-color: rgba(192, 57, 43, 0.3);
+}
+
+.ghost.danger:hover {
+  background: rgba(192, 57, 43, 0.08);
+}
+
+.webhook-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.webhook-url-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--muted, #8a94a6);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
 /* ---------------------------------------------------------------- Import */
 
 .import-panel {

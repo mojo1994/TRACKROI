@@ -458,6 +458,22 @@ async function syncProvider(providerId, button) {
   }
 }
 
+async function disconnectProvider(providerId, button) {
+  const labels = { meta: "Meta Ads", perfectpay: "Perfect Pay" };
+  const name = labels[providerId] || providerId;
+  if (!window.confirm(`Desconectar ${name}? Os dados importados serão mantidos, mas a conexão será removida.`)) return;
+  setButtonLoading(button, "Desconectando…");
+  try {
+    await apiFetch(`/api/integrations/${providerId}`, { method: "DELETE" });
+    setStatus(`${name} desconectado.`, "success");
+    await loadData(state.route, { silent: true });
+  } catch (error) {
+    setStatus(friendlyError(error), "error");
+  } finally {
+    setButtonLoading(button, "");
+  }
+}
+
 function showConnectMessage(providerId, message, tone) {
   const node = document.querySelector(`[data-connect-message="${providerId}"]`);
   if (node) {
@@ -1082,6 +1098,7 @@ function connectionCard(item) {
   const actions = `
       ${connectAction}
       ${isMeta && connected ? `<button type="button" class="ghost" data-sync-button="${escapeHtml(item.id)}">Sincronizar agora</button>` : ""}
+      ${connected ? `<button type="button" class="ghost danger" data-disconnect-button="${escapeHtml(item.id)}">Desconectar</button>` : ""}
       <button type="button" class="ghost" data-test-button="${escapeHtml(item.id)}">Testar conexão</button>
     `;
   const body = isMeta
@@ -1171,7 +1188,7 @@ function connectionAdvanced(integrations) {
       <summary><span class="advanced-title">Configurações avançadas</span><span class="advanced-caret"></span></summary>
       <div class="advanced-body">
         <form id="perfectpay-connection-form" class="stack-form compact-form">
-          <div class="form-title">Perfect Pay</div>
+          <div class="form-title">Perfect Pay — Webhook de vendas</div>
           <label><span>Status</span>
             <select id="perfectpay-status">
               <option value="not_connected" ${perfectPay.status !== "connected" ? "selected" : ""}>Não conectado</option>
@@ -1179,8 +1196,19 @@ function connectionAdvanced(integrations) {
               <option value="needs_reconnect" ${perfectPay.status === "needs_reconnect" ? "selected" : ""}>Precisa atenção</option>
             </select>
           </label>
-          <label><span>URL de eventos</span><input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" /></label>
-          <label><span>Segredo compartilhado</span><input id="perfectpay-webhook-secret" type="password" value="" placeholder="Novo segredo (opcional)" /></label>
+          <label><span>URL de eventos (cadastre na Perfect Pay)</span>
+            <div class="webhook-url-row">
+              <input id="perfectpay-webhook-url" type="text" value="${escapeHtml(perfectPay.webhookUrl || "")}" readonly />
+              <button type="button" class="ghost" id="copy-webhook-url-button">Copiar</button>
+            </div>
+          </label>
+          <label><span>Token do Webhook (recomendado)</span>
+            <input id="perfectpay-webhook-token" type="password" placeholder="Token String(32) do webhook no painel da Perfect Pay" value="" />
+          </label>
+          <label><span>Segredo compartilhado (HMAC, opcional)</span>
+            <input id="perfectpay-webhook-secret" type="password" placeholder="Novo segredo (opcional)" value="" />
+          </label>
+          <p class="form-hint">No painel da Perfect Pay, crie um webhook apontando para a URL acima e ative os eventos de venda (aprovação, pré-checkout etc.). O TrackROI valida o token do postback no recebimento para garantir que ele veio da sua conta.</p>
           <button type="submit" id="perfectpay-save-button">Salvar Perfect Pay</button>
         </form>
       </div>
@@ -1692,6 +1720,25 @@ function attachPageHandlers() {
   document.querySelectorAll("[data-sync-button]").forEach((button) => {
     button.onclick = () => syncProvider(button.dataset.syncButton, button);
   });
+  document.querySelectorAll("[data-disconnect-button]").forEach((button) => {
+    button.onclick = () => disconnectProvider(button.dataset.disconnectButton, button);
+  });
+
+  const copyWebhookUrlButton = el("copy-webhook-url-button");
+  if (copyWebhookUrlButton) {
+    copyWebhookUrlButton.onclick = async () => {
+      const input = el("perfectpay-webhook-url");
+      if (!input) return;
+      try {
+        await navigator.clipboard.writeText(input.value);
+        setStatus("URL de webhook copiada.", "success");
+      } catch {
+        input.select();
+        document.execCommand("copy");
+        setStatus("URL de webhook copiada.", "success");
+      }
+    };
+  }
 
   const productForm = el("product-form");
   if (productForm) {
@@ -1726,7 +1773,9 @@ function attachPageHandlers() {
         webhookUrl: el("perfectpay-webhook-url").value.trim(),
       };
       const secret = el("perfectpay-webhook-secret").value.trim();
+      const webhookToken = el("perfectpay-webhook-token").value.trim();
       if (secret) payload.webhookSecret = secret;
+      if (webhookToken) payload.webhookToken = webhookToken;
       setButtonLoading(submit, "Salvando…");
       try {
         await apiFetch("/api/integrations/perfectpay", { method: "PUT", body: JSON.stringify(payload) });

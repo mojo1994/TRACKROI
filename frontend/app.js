@@ -1836,6 +1836,10 @@ function showAuthForm(which) {
   const registerForm = el("register-form");
   if (loginForm) loginForm.hidden = which !== "login";
   if (registerForm) registerForm.hidden = which !== "register";
+  const toLogin = el("switch-login");
+  const toRegister = el("switch-register");
+  if (toLogin) toLogin.hidden = which === "login";
+  if (toRegister) toRegister.hidden = which === "register";
   setLoginError("");
   setRegisterError("");
   if (which === "register") {
@@ -1900,8 +1904,8 @@ async function bootstrap() {
     }
   });
 
-  el("show-register").addEventListener("click", () => showAuthForm("register"));
-  el("show-login").addEventListener("click", () => showAuthForm("login"));
+  el("switch-register").addEventListener("click", () => showAuthForm("register"));
+  el("switch-login").addEventListener("click", () => showAuthForm("login"));
 
   window.addEventListener("hashchange", () => {
     const next = normalizeRoute(location.hash.slice(1) || "dashboard");

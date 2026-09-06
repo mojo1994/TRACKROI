@@ -65,61 +65,51 @@
 
     <div id="login-view" class="login-shell">
       <section class="login-panel">
-        <div class="login-side">
-          <div class="brand login-brand">
-            <div class="brand-mark">T</div>
-            <div>
-              <div class="brand-name">TrackROI</div>
-              <div class="brand-subtitle">Rastreamento de vendas</div>
-            </div>
+        <div class="brand login-brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <div class="brand-name">TrackROI</div>
+            <div class="brand-subtitle">Rastreamento de vendas</div>
           </div>
-          <h2>Seus resultados,<br />em um só lugar.</h2>
-          <p class="login-side-copy">Importe as planilhas do Gerenciador de Anúncios e do seu gateway de pagamento. O TrackROI identifica cliques, vendas, gasto e campanhas — e calcula o ROI automaticamente.</p>
-          <ul class="login-benefits">
-            <li><span class="benefit-dot"></span>Importação simples de planilhas exportadas</li>
-            <li><span class="benefit-dot"></span>Funil, métricas e ROI atualizados automaticamente</li>
-            <li><span class="benefit-dot"></span>Sem código, sem processos manuais</li>
-          </ul>
         </div>
-        <div class="login-form-wrap">
-          <form id="login-form" class="login-form" data-auth-form="login">
-            <h1>Entrar</h1>
-            <p class="panel-line">Acesse o painel com sua conta.</p>
-            <label>
-              <span>Email</span>
-              <input id="email-input" type="email" autocomplete="username" placeholder="voce@empresa.com" />
-            </label>
-            <label>
-              <span>Senha</span>
-              <input id="password-input" type="password" autocomplete="current-password" placeholder="Sua senha" />
-            </label>
-            <button type="submit">Entrar</button>
-            <div id="login-error" class="login-error" hidden></div>
-            <p class="login-switch"><span>Crie sua conta</span> <button type="button" id="show-register" class="link-button">Cadastrar-se</button></p>
-            <p class="login-privacy"><a href="/politica-de-privacidade">Política de Privacidade</a></p>
-          </form>
 
-          <form id="register-form" class="login-form" data-auth-form="register" hidden>
-            <h1>Criar conta</h1>
-            <p class="panel-line">Tenha seu próprio dashboard de rastreamento.</p>
-            <label>
-              <span>Nome</span>
-              <input id="register-name" type="text" autocomplete="name" placeholder="Seu nome" />
-            </label>
-            <label>
-              <span>Email</span>
-              <input id="register-email" type="email" autocomplete="username" placeholder="voce@empresa.com" />
-            </label>
-            <label>
-              <span>Senha</span>
-              <input id="register-password" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres" />
-            </label>
-            <button type="submit">Criar conta</button>
-            <div id="register-error" class="login-error" hidden></div>
-            <p class="login-switch"><span>Já tem uma conta?</span> <button type="button" id="show-login" class="link-button">Entrar</button></p>
-            <p class="login-privacy"><a href="/politica-de-privacidade">Política de Privacidade</a></p>
-          </form>
+        <form id="login-form" class="login-form" data-auth-form="login">
+          <h1>Entrar</h1>
+          <label>
+            <span>Email</span>
+            <input id="email-input" type="email" autocomplete="username" placeholder="voce@empresa.com" />
+          </label>
+          <label>
+            <span>Senha</span>
+            <input id="password-input" type="password" autocomplete="current-password" placeholder="Sua senha" />
+          </label>
+          <button type="submit">Entrar</button>
+          <div id="login-error" class="login-error" hidden></div>
+        </form>
+
+        <form id="register-form" class="login-form" data-auth-form="register" hidden>
+          <h1>Criar conta</h1>
+          <label>
+            <span>Nome</span>
+            <input id="register-name" type="text" autocomplete="name" placeholder="Seu nome" />
+          </label>
+          <label>
+            <span>Email</span>
+            <input id="register-email" type="email" autocomplete="username" placeholder="voce@empresa.com" />
+          </label>
+          <label>
+            <span>Senha</span>
+            <input id="register-password" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres" />
+          </label>
+          <button type="submit">Criar conta</button>
+          <div id="register-error" class="login-error" hidden></div>
+        </form>
+
+        <div class="auth-switch-row">
+          <button type="button" id="switch-login" class="auth-switch-btn" hidden>Já tenho cadastro — <span>Entrar</span></button>
+          <button type="button" id="switch-register" class="auth-switch-btn">Não tem cadastro? <span>Cadastrar-se</span></button>
         </div>
+        <p class="login-privacy"><a href="/politica-de-privacidade">Política de Privacidade</a></p>
       </section>
     </div>
 

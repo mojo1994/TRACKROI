@@ -2,6 +2,7 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { URL } = require("url");
 
 const db = require("./src/db");
@@ -1260,6 +1261,111 @@ async function handleAuthLogout(req, res) {
   send(res, 200, { ok: true }, {}, req);
 }
 
+/* ------------------------------------------------------------- OAuth (popup) */
+
+const oauthStates = new Map();
+
+function sendOAuthPopupHtml(res, providerId, result) {
+  const payload = JSON.stringify({
+    type: "trackroi:oauth",
+    provider: providerId,
+    ok: result.ok === true,
+    connectedAccount: result.connectedAccount || null,
+    error: result.error || null,
+  }).replace(/</g, "\\u003c");
+  const html =
+    `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Conectando…</title></head>` +
+    `<body><p style="font-family:sans-serif;color:#555">Aguarde…</p>` +
+    `<script>window.opener.postMessage(${payload}, "*");window.close();<\/script></body></html>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(html);
+}
+
+async function handleIntegrationConnect(req, res, match, query) {
+  const provider = providers.get(match[1]);
+  if (!provider) {
+    send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
+    return;
+  }
+  if (!provider.getAuthUrl || !provider.handleOAuthCallback) {
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: "Este fornecedor não usa OAuth." });
+    return;
+  }
+  if (!provider.isConfigured || !provider.isConfigured()) {
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: "Integração ainda não configurada pelo administrador." });
+    return;
+  }
+  const token = String(query.token || "");
+  const user = token ? db.getUserByToken(token) : null;
+  if (!user) {
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: "Sessão inválida. Faça login novamente e tente conectar." });
+    return;
+  }
+  const dashboardId = db.ensureDefaultDashboard(user.id).id;
+  const state = crypto.randomBytes(24).toString("hex");
+  oauthStates.set(state, { token, providerId: provider.id, dashboardId });
+  try {
+    const url = provider.getAuthUrl(state);
+    res.writeHead(302, { Location: url, "Cache-Control": "no-store" });
+    res.end();
+  } catch (error) {
+    oauthStates.delete(state);
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: friendlyProviderError(provider.id, error) });
+  }
+}
+
+async function handleIntegrationCallback(req, res, match, query) {
+  const provider = providers.get(match[1]);
+  if (!provider) {
+    send(res, 404, { ok: false, error: "Provider não encontrado" }, {}, req);
+    return;
+  }
+  const state = String(query.state || "");
+  const entry = oauthStates.get(state);
+  oauthStates.delete(state);
+  if (!entry || entry.providerId !== provider.id) {
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: "Autorização expirada ou inválida. Clique em \"Conectar\" e tente de novo." });
+    return;
+  }
+  const user = db.getUserByToken(entry.token);
+  if (!user) {
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: "Sessão inválida. Faça login e tente conectar de novo." });
+    return;
+  }
+  let accountName;
+  try {
+    const oauth = await provider.handleOAuthCallback({ state, code: String(query.code || "") });
+    const accounts = await provider.listAdAccounts(oauth.accessToken);
+    const account = accounts.find((item) => item.status === 1) || accounts[0];
+    accountName = account?.name || oauth.connectedAccount || "Meta Ads";
+    await db.upsertIntegration(provider.id, {
+      accessToken: encryptSecret(oauth.accessToken),
+      adAccountId: account ? String(account.accountId || account.id).replace(/^act_/, "") : (oauth.accountId || null),
+      adAccountName: accountName,
+      connectedAccount: accountName,
+      status: "connected",
+      connected: true,
+      apiStatus: "connected",
+      connectedAt: new Date().toISOString(),
+      lastSyncAt: new Date().toISOString(),
+      lastError: null,
+    }, entry.dashboardId);
+    db.appendAuditLog({
+      actorUserId: user.id,
+      action: "integration.connect",
+      resourceType: "integration",
+      resourceId: provider.id,
+      metadata: { dashboardId: entry.dashboardId },
+    });
+  } catch (error) {
+    logger.error("OAuth callback failed", { provider: provider.id, error: error.message });
+    sendOAuthPopupHtml(res, provider.id, { ok: false, error: friendlyProviderError(provider.id, error) });
+    return;
+  }
+  broadcastSSE({ type: "data", changed: ["integrations"] }, user.id);
+  sendOAuthPopupHtml(res, provider.id, { ok: true, connectedAccount: accountName });
+}
+
 /* ------------------------------------------------------------- Webhooks */
 
 async function handlePerfectPayWebhook(req, res) {
@@ -1675,6 +1781,17 @@ async function main() {
       }
       if (req.method === "POST" && pathname === "/api/auth/logout") {
         await handleAuthLogout(req, res);
+        return;
+      }
+
+      const oauthConnectMatch = pathname.match(/^\/api\/integrations\/connect\/([a-z]+)$/);
+      if (req.method === "GET" && oauthConnectMatch) {
+        await handleIntegrationConnect(req, res, oauthConnectMatch, query);
+        return;
+      }
+      const oauthCallbackMatch = pathname.match(/^\/api\/integrations\/connect\/([a-z]+)\/callback$/);
+      if (req.method === "GET" && oauthCallbackMatch) {
+        await handleIntegrationCallback(req, res, oauthCallbackMatch, query);
         return;
       }
 

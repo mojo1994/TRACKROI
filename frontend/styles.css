@@ -144,27 +144,26 @@ a {
 }
 
 .brand-logo {
-  width: 76px;
-  height: 76px;
+  width: 40px;
+  height: 40px;
   object-fit: contain;
 }
 
 .brand-mark.brand-logo {
-  flex-basis: 76px;
-  width: 76px;
-  height: 76px;
-  align-self: start;
-}
-
-.app-shell.sidebar-collapsed .brand-mark.brand-logo {
   flex-basis: 40px;
   width: 40px;
   height: 40px;
-  padding: 4px;
 }
-.app-shell.sidebar-collapsed .brand-logo {
+
+.app-shell.sidebar-collapsed .brand-mark.brand-logo {
+  flex-basis: 32px;
   width: 32px;
   height: 32px;
+  padding: 2px;
+}
+.app-shell.sidebar-collapsed .brand-logo {
+  width: 28px;
+  height: 28px;
 }
 
 .brand-name {

@@ -611,7 +611,7 @@ function upsertSale(sale) {
       sale.status,
       sale.amountCents ?? sale.amount_cents ?? 0,
       sale.currency || "BRL",
-      sale.trackroiClickId || sale.trackroi_click_id,
+      (sale.trackroiClickId ?? sale.trackroi_click_id) ?? null,
       sale.source,
       sale.updatedAt || sale.updated_at || new Date().toISOString(),
       sale.gateway,

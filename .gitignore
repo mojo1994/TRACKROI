@@ -7,3 +7,5 @@ backend/certs/
 .DS_Store
 ID.txt
 TOKEN.txt
+prompt.txt
+size.txt

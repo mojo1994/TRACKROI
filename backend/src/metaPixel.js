@@ -44,16 +44,17 @@ function parseMetaError(payload) {
   const error = payload?.error || {};
   const code = Number(error.code);
   const message = String(error.message || "");
-  if (code === 190 || /token.*(invalid|expired)|invalid.*token|expired.*token/.test(message.toLowerCase())) {
+  const lower = message.toLowerCase();
+  if (code === 190 || /token.*(invalid|expired)|invalid.*token|expired.*token/.test(lower)) {
     return new Error("Token inválido ou expirado para este Pixel.");
   }
-  if (code === 803 || /not exist|could not be loaded|aliases|not found/.test(message.toLowerCase())) {
-    return new Error("Pixel ID não encontrado ou o token não tem acesso a esse Pixel.");
-  }
-  if (code === 100 || /missing permissions?|permission/i.test(message.toLowerCase())) {
-    const error100 = new Error("Token sem permissão de leitura para este Pixel.");
+  if (code === 100 || /missing permissions?|permission/i.test(lower)) {
+    const error100 = new Error("Token sem permissão para este Pixel.");
     error100.metaCode = 100;
     return error100;
+  }
+  if (code === 803 || /not exist|do not exist|not found|aliases/i.test(lower)) {
+    return new Error("Pixel não encontrado. Confira se o ID do Pixel está correto e se o token foi gerado para esse mesmo Pixel (Gerenciador de Eventos).");
   }
   return new Error(message || "A Meta rejeitou a solicitação.");
 }
@@ -63,31 +64,29 @@ async function validateCredentials({ pixelId, accessToken }) {
   const token = String(accessToken || "").trim();
   if (!id) throw new Error("ID do Pixel é obrigatório.");
   if (!token) throw new Error("Token de acesso é obrigatório.");
-  const result = await graphRequest(`/${encodeURIComponent(id)}?access_token=${encodeURIComponent(token)}&fields=name`);
-  if (result && result.ok) {
-    return { pixelId: id, name: String(result.body?.name || ""), validatedVia: "read" };
+  const read = await graphRequest(`/${encodeURIComponent(id)}?access_token=${encodeURIComponent(token)}&fields=name`);
+  if (read && read.ok) {
+    return { pixelId: id, name: String(read.body?.name || ""), validatedVia: "read" };
   }
-  if (!result) {
-    throw new Error("Não foi possível validar o Pixel agora. Verifique sua conexão e tente novamente.");
-  }
-  const readError = parseMetaError(result.body);
-  if (readError.metaCode !== 100) throw readError;
   const testEventCode = `trackroi_connect_validate_${Date.now()}`;
+  let sent;
   try {
-    const sent = await sendTestEvent({ pixelId: id, accessToken: token, testEventCode });
-    return {
-      pixelId: id,
-      name: null,
-      validatedVia: "test_event",
-      testEventCode,
-      eventsReceived: sent.eventsReceived,
-    };
+    sent = await sendTestEvent({ pixelId: id, accessToken: token, testEventCode });
   } catch (eventError) {
+    const readError = read ? parseMetaError(read.body) : null;
+    if (readError && readError.metaCode !== 100) throw readError;
     if (eventError.metaCode === 100) {
-      throw new Error("O token não tem permissão para este Pixel (nem para envio de eventos). Gere um novo token em Gerenciador de Eventos → API de Conversões.");
+      throw new Error("O token não tem permissão para enviar eventos a este Pixel. Gere um novo token no Gerenciador de Eventos → API de Conversões.");
     }
     throw eventError;
   }
+  return {
+    pixelId: id,
+    name: null,
+    validatedVia: "test_event",
+    testEventCode,
+    eventsReceived: sent.eventsReceived,
+  };
 }
 
 function buildFbc(fbclid, createdAt) {

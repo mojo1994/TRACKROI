@@ -2063,11 +2063,11 @@ const pixelForm = el("pixel-form");
         messageNode.classList.remove("is-error");
       }
       try {
-        await apiFetch("/api/pixel", {
+        const result = await apiFetch("/api/pixel", {
           method: "PUT",
           body: JSON.stringify({ pixelId: el("pixel-id").value.trim(), accessToken: el("pixel-token").value.trim() }),
         });
-        setStatus("Pixel conectado com sucesso.", "success");
+        setStatus(result.warning || "Pixel conectado com sucesso.", "success");
         await loadData(state.route, { silent: true });
       } catch (error) {
         const message = friendlyError(error);

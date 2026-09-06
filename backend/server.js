@@ -627,9 +627,23 @@ async function handlePixelPut(req, res, user) {
     action: "pixel.connected",
     resourceType: "pixel",
     resourceId: "meta_pixel",
-    metadata: { pixelId: verified.pixelId, pixelName: verified.name || null },
+    metadata: {
+      pixelId: verified.pixelId,
+      pixelName: verified.name || null,
+      validatedVia: verified.validatedVia,
+      testEventCode: verified.testEventCode || null,
+      eventsReceived: verified.eventsReceived ?? null,
+    },
   });
-  send(res, 200, { ok: true, pixel: pixelConnectionForUser(user.id), verified: { pixelId: verified.pixelId, name: verified.name || null } }, {}, req);
+  const payload = {
+    ok: true,
+    pixel: pixelConnectionForUser(user.id),
+    verified: { pixelId: verified.pixelId, name: verified.name || null, validatedVia: verified.validatedVia },
+  };
+  if (verified.validatedVia === "test_event") {
+    payload.warning = "Pixel conectado! Seu token não permite leitura das informações do Pixel, então foi validado enviando um evento de teste para a Meta. Se quiser ver o nome do Pixel, gere um token com permissão de leitura.";
+  }
+  send(res, 200, payload, {}, req);
 }
 
 async function handlePixelTest(req, res, user) {

@@ -5,19 +5,29 @@ const path = require("path");
 const PORT = Number(process.env.PORT || 5173);
 const ROOT = __dirname;
 const API_BASE = process.env.API_BASE || "";
+const NOTIFICACAO_DIR = path.join(__dirname, "..", "notificacao");
 
 function contentType(filePath) {
   if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
   if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
   if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
   if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
+  if (filePath.endsWith(".mp3")) return "audio/mpeg";
+  if (filePath.endsWith(".png")) return "image/png";
+  if (filePath.endsWith(".svg")) return "image/svg+xml";
   return "application/octet-stream";
 }
 
 const server = http.createServer((req, res) => {
   const requestPath = req.url === "/" ? "/index.html" : req.url.split("?")[0];
   const safePath = path.normalize(requestPath).replace(/^(\.\.(\/|\\|$))+/, "");
-  let filePath = path.join(ROOT, safePath);
+  let filePath;
+  if (requestPath.startsWith("/notificacao/")) {
+    const name = safePath.split(/[\\/]/).pop();
+    filePath = path.join(NOTIFICACAO_DIR, name);
+  } else {
+    filePath = path.join(ROOT, safePath);
+  }
   if (!path.extname(filePath)) {
     const htmlCandidate = `${filePath}.html`;
     if (fs.existsSync(htmlCandidate)) filePath = htmlCandidate;

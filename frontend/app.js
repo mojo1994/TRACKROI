@@ -28,6 +28,7 @@ const state = {
   routeData: null,
   dataCache: {},
   loading: false,
+  settings: null,
   sidebarExpanded: localStorage.getItem("trackroi_sidebar_expanded") !== "0",
 };
 
@@ -139,6 +140,170 @@ function setStatus(message, tone = "") {
     node.classList.toggle("is-error", tone === "error");
     node.classList.toggle("is-success", tone === "success");
   }
+}
+
+/* ------------------------------------------------------------- Notificações */
+
+const notificationAssets = {
+  sound: `${API_BASE || ""}/notificacao/notificacao.mp3`,
+  icon: `${API_BASE || ""}/notificacao/logo.png`,
+};
+let notificationAudio = null;
+
+function notificationsSupported() {
+  return typeof Notification !== "undefined" && "Notification" in window;
+}
+
+function notificationSoundEnabled() {
+  return (state.settings?.notification || {}).sound !== false;
+}
+
+function notificationBrowserEnabled() {
+  return (state.settings?.notification || {}).browser !== false;
+}
+
+async function refreshNotificationSettings() {
+  try {
+    const result = await apiFetch("/api/settings");
+    state.settings = result.settings || {};
+  } catch {
+    /* settings não disponível ainda */
+  }
+}
+
+function prepareNotificationSound() {
+  try {
+    const unlock = new Audio(notificationAssets.sound);
+    unlock.volume = 0;
+    unlock.muted = true;
+    const play = unlock.play();
+    if (play && play.catch) play.catch(() => {});
+  } catch {
+    /* ignora bloqueio de autoplay */
+  }
+}
+
+function playNotificationSound() {
+  if (!notificationSoundEnabled()) return;
+  try {
+    if (!notificationAudio) notificationAudio = new Audio(notificationAssets.sound);
+    notificationAudio.volume = 0.8;
+    notificationAudio.currentTime = 0;
+    const play = notificationAudio.play();
+    if (play && play.catch) play.catch(() => {});
+  } catch {
+    /* ignora */
+  }
+}
+
+function showToastNotification({ title, body }) {
+  let root = document.getElementById("toast-root");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "toast-root";
+    root.className = "toast-root";
+    document.body.appendChild(root);
+  }
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.innerHTML = `
+    <img class="toast-logo" src="${notificationAssets.icon}" alt="" />
+    <div class="toast-text">
+      <div class="toast-title">${escapeHtml(title)}</div>
+      <div class="toast-body">${escapeHtml(body)}</div>
+    </div>
+  `;
+  root.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("visible"));
+  setTimeout(() => {
+    toast.classList.remove("visible");
+    setTimeout(() => toast.remove(), 350);
+  }, 5000);
+}
+
+function showSaleNotification({ title, body }) {
+  showToastNotification({ title, body });
+  if (!notificationBrowserEnabled()) return;
+  if (!notificationsSupported() || Notification.permission !== "granted") return;
+  try {
+    const notification = new Notification(title, {
+      body,
+      icon: notificationAssets.icon,
+      badge: notificationAssets.icon,
+      tag: `trackroi-${Date.now()}`,
+      silent: true,
+      renotify: false,
+    });
+    notification.onclick = () => {
+      try {
+        window.focus();
+        notification.close();
+      } catch {
+        /* ignora */
+      }
+    };
+    setTimeout(() => {
+      try {
+        notification.close();
+      } catch {
+        /* ignora */
+      }
+    }, 15000);
+    playNotificationSound();
+  } catch {
+    playNotificationSound();
+  }
+}
+
+function renderNotificationModal() {
+  const existing = document.getElementById("notification-modal");
+  if (existing) existing.remove();
+  const modal = document.createElement("div");
+  modal.id = "notification-modal";
+  modal.className = "modal-overlay visible";
+  modal.innerHTML = `
+    <div class="modal-box">
+      <img class="modal-logo" src="${notificationAssets.icon}" alt="TrackROI" />
+      <h3>Receba alertas de vendas</h3>
+      <p>Permita as notificações para ser avisado em tempo real, com som, sempre que uma venda for gerada ou aprovada (como notificação do Windows).</p>
+      <div class="modal-actions">
+        <button type="button" id="notification-allow" class="btn-primary">Permitir notificações</button>
+        <button type="button" id="notification-later" class="btn-secondary">Agora não</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  el("notification-allow").onclick = async () => {
+    localStorage.setItem("trackroi_notif_asked", "1");
+    const result = await Notification.requestPermission();
+    modal.remove();
+    if (result === "granted") {
+      prepareNotificationSound();
+      showSaleNotification({ title: "Venda aprovada", body: "Sua comissão > R$ 0,00 · isso foi um teste de som" });
+    } else {
+      setStatus("Notificações bloqueadas. Ative nas configurações do seu navegador para receber alertas de vendas.", "error");
+    }
+  };
+  el("notification-later").onclick = () => {
+    localStorage.setItem("trackroi_notif_asked", "1");
+    modal.remove();
+  };
+}
+
+function askNotificationPermission() {
+  if (!notificationsSupported()) return;
+  if (Notification.permission === "granted") {
+    prepareNotificationSound();
+    showSaleNotification({ title: "Venda aprovada", body: "Sua comissão > R$ 0,00 · isso foi um teste de som" });
+    return;
+  }
+  if (Notification.permission === "denied") {
+    setStatus("Notificações bloqueadas. Ative nas configurações do seu navegador para receber alertas de vendas.", "error");
+    return;
+  }
+  const alreadyAsked = localStorage.getItem("trackroi_notif_asked") === "1";
+  if (alreadyAsked) return;
+  renderNotificationModal();
 }
 
 function setLoginError(message) {
@@ -359,6 +524,9 @@ function stopSSE() {
 
 function handleRealtime(message) {
   if (!state.user) return;
+  if (message.notification && message.notification.title) {
+    showSaleNotification({ title: message.notification.title, body: message.notification.body });
+  }
   const changed = message.changed || [];
   const relevant = changed.includes(state.route) || (state.route === "dashboard" && changed.some((c) => ["dashboard", "funnel", "metrics", "sales"].includes(c)));
   if (relevant) {
@@ -1289,8 +1457,19 @@ function connectionsPage(data) {
 
 function settingsPage(data) {
   const settings = data.settings || {};
+  state.settings = settings;
   const general = settings.general || {};
   const finance = settings.finance || {};
+  const notification = settings.notification || {};
+  const permissionStatus = notificationsSupported() ? Notification.permission : "unsupported";
+  const permissionLabel =
+    permissionStatus === "granted"
+      ? "Permitido no navegador"
+      : permissionStatus === "denied"
+        ? "Bloqueado no navegador — libere no site"
+        : permissionStatus === "unsupported"
+          ? "Navegador não suporta"
+          : "Pendente — clique em \"Permitir\"";
   return `
     ${sectionPanel(
       "Configurações",
@@ -1302,6 +1481,23 @@ function settingsPage(data) {
         <label><span>Moeda</span><input id="currency" type="text" value="${escapeHtml(general.currency || "")}" /></label>
         <div class="form-actions"><button type="submit" id="save-settings-submit">Salvar</button><span class="form-status" id="settings-form-status"></span></div>
       </form>
+      `
+    )}
+    ${sectionPanel(
+      "Notificações",
+      "Avisos em tempo real com som a cada venda gerada ou aprovada (notificação do Windows no desktop e toast no celular).",
+      `
+      <div class="settings-grid">
+        <label class="switch-row"><span>Som da notificação (mp3)</span><input id="notif-sound" type="checkbox" ${notification.sound === false ? "" : "checked"} /></label>
+        <div class="notification-permission-row">
+          <span class="status-pill ${permissionStatus === "granted" ? "ok" : ""}">${escapeHtml(permissionLabel)}</span>
+        </div>
+        <div class="form-actions">
+          <button type="button" id="notif-test" class="btn-primary">Testar notificação e som</button>
+          <button type="button" id="notif-permission" class="btn-secondary">Permitir no navegador</button>
+          <span class="form-status" id="notif-status"></span>
+        </div>
+      </div>
       `
     )}
     ${sectionPanel(
@@ -1824,6 +2020,66 @@ function attachPageHandlers() {
     };
   }
 
+  const notifSoundInput = el("notif-sound");
+  if (notifSoundInput) {
+    notifSoundInput.onchange = async () => {
+      const payload = {
+        notification: {
+          ...((state.settings?.notification || {})),
+          browser: notificationBrowserEnabled(),
+          sound: notifSoundInput.checked,
+        },
+      };
+      try {
+        await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+        state.settings.notification = payload.notification;
+        setStatus(notifSoundInput.checked ? "Som da notificação ativado." : "Som da notificação desativado.", "success");
+      } catch (error) {
+        setStatus(friendlyError(error), "error");
+      }
+    };
+  }
+
+  const notifTestButton = el("notif-test");
+  if (notifTestButton) {
+    notifTestButton.onclick = async () => {
+      const statusNode = el("notif-status");
+      if (statusNode) statusNode.textContent = "";
+      prepareNotificationSound();
+      if (notificationsSupported() && Notification.permission !== "granted") {
+        localStorage.setItem("trackroi_notif_asked", "1");
+        const result = await Notification.requestPermission();
+        if (result !== "granted") {
+          if (statusNode) statusNode.textContent = "Permita as notificações no navegador para ver o teste.";
+          return;
+        }
+      }
+      showSaleNotification({ title: "Venda aprovada", body: "Sua comissão > R$ 99,90 · PIX — teste de notificação" });
+      if (statusNode) statusNode.textContent = "Teste enviado.";
+    };
+  }
+
+  const notifPermissionButton = el("notif-permission");
+  if (notifPermissionButton) {
+    notifPermissionButton.onclick = async () => {
+      const statusNode = el("notif-status");
+      if (statusNode) statusNode.textContent = "";
+      if (!notificationsSupported()) {
+        if (statusNode) statusNode.textContent = "Seu navegador não suporta notificações.";
+        return;
+      }
+      localStorage.setItem("trackroi_notif_asked", "1");
+      const result = await Notification.requestPermission();
+      if (result === "granted") {
+        prepareNotificationSound();
+        showSaleNotification({ title: "Notificações ativadas", body: "Você receberá alertas de vendas com som." });
+        if (statusNode) statusNode.textContent = "Permitido. Recarregue a página se o texto ainda estiver pendente.";
+      } else {
+        if (statusNode) statusNode.textContent = "Bloqueado. Libere a permissão nas configurações do site no navegador.";
+      }
+    };
+  }
+
   const saveSettingsButton = el("save-settings-button");
   if (saveSettingsButton) {
     saveSettingsButton.onclick = () => {
@@ -1878,6 +2134,8 @@ async function login(email, password) {
   showApp();
   startSSE();
   await loadData();
+  await refreshNotificationSettings().catch(() => {});
+  prepareNotificationSound();
 }
 
 function showAuthForm(which) {
@@ -1912,6 +2170,8 @@ async function register(name, email, password) {
   showApp();
   startSSE();
   await loadData();
+  await refreshNotificationSettings().catch(() => {});
+  askNotificationPermission();
 }
 
 async function bootstrap() {
@@ -1973,6 +2233,8 @@ async function bootstrap() {
       showApp();
       startSSE();
       await loadData();
+      await refreshNotificationSettings().catch(() => {});
+      prepareNotificationSound();
       return;
     } catch {
       state.token = "";

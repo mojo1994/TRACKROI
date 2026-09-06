@@ -30,6 +30,20 @@ const STATUS_ENUM_MAP = {
 
 const CHECKOUT_EVENTS = new Set(["initiated", "precheckout", "checkout_error", "expired"]);
 
+function paymentMethodLabel(payload) {
+  if (!payload) return null;
+  const method = Number(payload.payment_method_enum);
+  const type = Number(payload.payment_type_enum);
+  const raw = String(payload.payment_method || "").toLowerCase();
+  if (raw.includes("pix") || method === 17 || method === 8) return "PIX";
+  if (type === 2 || raw.includes("boleto")) return "boleto";
+  if (type === 1 || type === 4 || type === 6 || [1, 3, 4, 5, 6, 7, 10, 13, 14, 16].includes(method)) {
+    return "cartão de crédito";
+  }
+  if (type === 3 || method === 11 || raw.includes("paypal")) return "paypal";
+  return null;
+}
+
 const provider = {
   id: "perfectpay",
   displayName: "Perfect Pay",
@@ -119,6 +133,7 @@ const provider = {
         plan: payload.plan || null,
         dateCreated: payload.date_created || null,
         dateApproved: payload.date_approved || null,
+        paymentMethod: paymentMethodLabel(payload),
       };
     }
     const transactionId = String(payload?.transaction_id || payload?.transactionId || payload?.id || "").trim();

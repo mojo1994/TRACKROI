@@ -220,6 +220,19 @@ function broadcastSSE(message, userId) {
   }
 }
 
+const NOTIFY_SALE_EVENTS = new Set([
+  "approved", "pending", "in_process", "authorized", "completed", "in_review", "in_mediation",
+]);
+
+function formatBRL(cents) {
+  const value = (Number(cents) || 0) / 100;
+  try {
+    return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(value);
+  } catch {
+    return `R$ ${value.toFixed(2).replace(".", ",")}`;
+  }
+}
+
 function handleEvents(req, res) {
   const { token } = getQuery(req.url);
   const user = token ? db.getUserByToken(token) : null;
@@ -1160,7 +1173,20 @@ async function handlePerfectPayWebhook(req, res) {
     resourceId: db.makeId("we"),
     metadata: { eventType: event.eventType, transactionId: event.transactionId, duplicate: false, dashboardId },
   });
-  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "logs", "integrations"], dashboardId }, dashOwner?.owner_id || null);
+
+  let notification = null;
+  if (!event.isCheckout && NOTIFY_SALE_EVENTS.has(event.eventType)) {
+    const amountLabel = formatBRL(event.amountCents);
+    notification = {
+      title: event.eventType === "approved" ? "Venda aprovada" : "Venda gerada",
+      body: event.paymentMethod
+        ? `Sua comissão > ${amountLabel} · ${event.paymentMethod}`
+        : `Sua comissão > ${amountLabel}`,
+      paymentMethod: event.paymentMethod || null,
+    };
+  }
+
+  broadcastSSE({ type: "data", changed: ["dashboard", "sales", "funnel", "logs", "integrations"], dashboardId, notification }, dashOwner?.owner_id || null);
   send(res, 200, { ok: true, duplicate: false, idempotency_key: idempotencyKey, sale_status: event.eventType }, {}, req);
 }
 
@@ -1412,6 +1438,7 @@ async function main() {
           appearance: { ...(current.appearance || {}), ...((body || {}).appearance || {}) },
           dashboard: { ...(current.dashboard || {}), ...((body || {}).dashboard || {}) },
           finance: { ...(current.finance || {}), ...((body || {}).finance || {}) },
+          notification: { ...(current.notification || {}), ...((body || {}).notification || {}) },
         }, dashboardId);
         db.appendAuditLog({ actorUserId: auth.user.id, action: "settings.update", resourceType: "settings", resourceId: "global" });
         broadcastSSE({ type: "data", changed: ["settings"], dashboardId }, auth.user.id);

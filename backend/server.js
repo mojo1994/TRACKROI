@@ -21,7 +21,7 @@ const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || FRONTEND_ORIGIN)
   .map((o) => o.trim())
   .filter(Boolean);
 
-const ALLOW_REGISTRATION = process.env.ALLOW_REGISTRATION === "true";
+const ALLOW_REGISTRATION = process.env.ALLOW_REGISTRATION !== "false";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",

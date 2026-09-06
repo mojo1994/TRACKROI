@@ -11,6 +11,16 @@
   </head>
   <body>
     <div id="app-view" class="app-shell" hidden>
+      <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true"></div>
+
+      <header class="mobile-topbar">
+        <button id="mobile-menu-button" class="mobile-menu-button" type="button" aria-label="Abrir menu" aria-controls="nav-links" aria-expanded="false">
+          <span class="mobile-hamburger" aria-hidden="true"></span>
+        </button>
+        <span class="mobile-topbar-title" id="mobile-page-title">Dashboard</span>
+        <div class="mobile-topbar-actions" id="mobile-page-actions"></div>
+      </header>
+
       <aside class="sidebar">
         <button id="sidebar-toggle" class="brand sidebar-toggle" type="button" aria-label="Alternar menu lateral">
           <div class="brand-mark">T</div>

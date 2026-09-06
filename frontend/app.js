@@ -390,6 +390,7 @@ function updateNav() {
     item.classList.toggle("active", item.dataset.route === state.route);
   });
   moveNavIndicator();
+  if (drawerSetOpen) drawerSetOpen(false);
 }
 
 function moveNavIndicator() {
@@ -434,6 +435,76 @@ function mountSidebarIcons() {
     applySidebarState();
   };
   window.addEventListener("resize", moveNavIndicator);
+}
+
+/* --------------------------------------------------- Responsive shell (mobile) */
+
+function debounce(fn, ms = 160) {
+  let token = null;
+  return (...args) => {
+    clearTimeout(token);
+    token = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function prepareResponsiveTables(root = document) {
+  root.querySelectorAll(".table-wrap").forEach((wrap) => {
+    const table = wrap.querySelector("table");
+    if (!table) return;
+    const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      row.querySelectorAll("td").forEach((cell, index) => {
+        if (headers[index]) cell.setAttribute("data-label", headers[index]);
+        const text = (cell.textContent || "").replace(/\s+/g, " ").trim();
+        if (text && !cell.hasAttribute("title")) cell.setAttribute("title", text);
+      });
+    });
+  });
+}
+
+let drawerSetOpen = null;
+
+function mountResponsiveShell() {
+  const app = el("app-view");
+  if (!app) return;
+  const backdrop = el("drawer-backdrop");
+  const menu = el("mobile-menu-button");
+  const setOpen = (open) => {
+    app.classList.toggle("drawer-open", open);
+    if (menu) menu.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  drawerSetOpen = setOpen;
+  if (menu) {
+    menu.onclick = () => setOpen(!app.classList.contains("drawer-open"));
+  }
+  if (backdrop) backdrop.onclick = () => setOpen(false);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setOpen(false);
+  });
+
+  const sidebar = document.querySelector(".sidebar");
+  let touchStart = null;
+  if (sidebar) {
+    sidebar.addEventListener("touchstart", (event) => {
+      const point = event.touches && event.touches[0];
+      if (point) touchStart = { x: point.clientX, y: point.clientY };
+    }, { passive: true });
+    sidebar.addEventListener("touchend", (event) => {
+      if (!touchStart) return;
+      const point = event.changedTouches && event.changedTouches[0];
+      if (point) {
+        const dx = point.clientX - touchStart.x;
+        const dy = point.clientY - touchStart.y;
+        if (Math.abs(dy) < Math.abs(dx) && dx < -40) setOpen(false);
+      }
+      touchStart = null;
+    }, { passive: true });
+  }
+
+  window.addEventListener("hashchange", () => setOpen(false));
+  window.addEventListener("resize", debounce(() => {
+    if (window.innerWidth >= 1024) setOpen(false);
+  }));
 }
 
 /* ------------------------------------------------------------- Data loading */
@@ -987,6 +1058,20 @@ function pageControls(route) {
     logs: refresh,
   };
   controls.innerHTML = routeControls[route] || refresh;
+  mobilePageActions(route);
+}
+
+function mobilePageActions(route) {
+  const actions = el("mobile-page-actions");
+  if (!actions) return;
+  const refresh = `<button id="mobile-refresh-button" type="button" class="ghost" aria-label="Atualizar">↻</button>`;
+  if (route === "settings") {
+    actions.innerHTML = `<button id="mobile-save-settings-button" type="button">Salvar</button>`;
+  } else if (route === "products") {
+    actions.innerHTML = `<button id="mobile-product-create-button" type="button">Novo</button>${refresh}`;
+  } else {
+    actions.innerHTML = refresh;
+  }
 }
 
 function pageTitle(route) {
@@ -1003,6 +1088,8 @@ function pageTitle(route) {
   const [eyebrow, title] = titles[route];
   el("page-eyebrow").textContent = eyebrow;
   el("page-title").textContent = title;
+  const mobileTitle = el("mobile-page-title");
+  if (mobileTitle) mobileTitle.textContent = title;
 }
 
 function emptyDashboard() {
@@ -1684,6 +1771,7 @@ function renderPage() {
   pageTitle(state.route);
   pageControls(state.route);
   root.innerHTML = renderers[state.route](pageData);
+  prepareResponsiveTables(root);
   if ((state.route === "dashboard" || state.route === "funnel") && pageData.funnel?.stages) {
     animateFunnel(pageData.funnel.stages);
   }
@@ -1764,6 +1852,7 @@ function setupImportHandlers() {
           const preview = buildImportPreview(reader.result, file.name);
           previewNode.hidden = false;
           previewNode.innerHTML = preview.html;
+          prepareResponsiveTables(previewNode);
         } catch (error) {
           showImportStatus(statusNode, error.message || "Não foi possível ler o arquivo.", "error");
         }
@@ -1923,6 +2012,28 @@ function buildImportPreview(content, filename) {
 function attachPageHandlers() {
   const refresh = el("refresh-button");
   if (refresh) refresh.onclick = () => loadData(state.route);
+
+  const mobileRefresh = el("mobile-refresh-button");
+  if (mobileRefresh) mobileRefresh.onclick = () => loadData(state.route);
+
+  const mobileSave = el("mobile-save-settings-button");
+  if (mobileSave) {
+    mobileSave.onclick = () => {
+      const submit = el("save-settings-submit");
+      if (submit) submit.click();
+    };
+  }
+
+  const mobileNewProduct = el("mobile-product-create-button");
+  if (mobileNewProduct) {
+    mobileNewProduct.onclick = () => {
+      const form = el("product-form");
+      if (!form) return;
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      const input = form.querySelector("input");
+      if (input) input.focus();
+    };
+  }
 
   const reload = el("reload-button");
   if (reload) reload.onclick = () => loadData(state.route);
@@ -2359,6 +2470,7 @@ async function bootstrap() {
   mountSidebarIcons();
   applySidebarState();
   prepareNotificationSound();
+  mountResponsiveShell();
 
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();

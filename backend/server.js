@@ -1163,6 +1163,7 @@ async function handlePerfectPayWebhook(req, res) {
     const source = event.trackroiClickId ? "direct" : "meta";
     const saleAt = event.dateApproved || event.dateCreated || receivedAt;
     db.upsertSale({
+      id: db.makeId("sa"),
       gateway: "perfectpay",
       gatewayTransactionId: event.transactionId,
       eventType: event.eventType,
@@ -1171,6 +1172,7 @@ async function handlePerfectPayWebhook(req, res) {
       currency: event.currency,
       trackroiClickId: event.trackroiClickId,
       source,
+      quantity: event.quantity || 1,
       dashboardId,
       createdAt: saleAt,
       updatedAt: receivedAt,

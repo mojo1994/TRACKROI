@@ -34,6 +34,7 @@ const state = {
 
 const sidebarIcons = {
   dashboard: iconDashboard(),
+  campaigns: iconCampaigns(),
   sales: iconSales(),
   funnel: iconFunnel(),
   metrics: iconMetrics(),
@@ -45,7 +46,7 @@ const sidebarIcons = {
 };
 
 function normalizeRoute(route) {
-  const allowed = new Set(["dashboard", "sales", "funnel", "metrics", "products", "connections", "settings", "logs"]);
+  const allowed = new Set(["dashboard", "campaigns", "sales", "funnel", "metrics", "products", "connections", "settings", "logs"]);
   return allowed.has(route) ? route : "dashboard";
 }
 
@@ -512,11 +513,13 @@ function mountResponsiveShell() {
 const routeFetch = {
   dashboard: async () => {
     const query = dashboardQuery();
-    const [dashboard, adsManager] = await Promise.all([
-      apiFetch(`/api/dashboard?${query}`),
-      apiFetch(`/api/meta/ads-campaigns?${query}`).catch((error) => ({ connected: null, error: friendlyError(error) })),
-    ]);
-    return { ok: true, ...dashboard, adsManager };
+    const dashboard = await apiFetch(`/api/dashboard?${query}`);
+    return { ok: true, ...dashboard };
+  },
+  campaigns: async () => {
+    const query = dashboardQuery();
+    const adsManager = await apiFetch(`/api/meta/ads-campaigns?${query}`).catch((error) => ({ connected: null, error: friendlyError(error) }));
+    return { ok: true, adsManager };
   },
   funnel: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
   metrics: () => apiFetch(`/api/dashboard?${dashboardQuery()}`),
@@ -1058,6 +1061,7 @@ function pageControls(route) {
     : "";
   const routeControls = {
     dashboard: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
+    campaigns: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
     funnel: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
     metrics: `${periodSelect}${customDates}${sourceSelect}${refresh}`,
     sales: refresh,
@@ -1086,6 +1090,7 @@ function mobilePageActions(route) {
 function pageTitle(route) {
   const titles = {
     dashboard: ["Dashboard", "Resumo geral"],
+    campaigns: ["Campanhas", "Gerenciador de Anúncios"],
     sales: ["Vendas", "Pedidos e eventos de pagamento"],
     funnel: ["Funil", "Conversão por etapa"],
     metrics: ["Métricas", "Resumo financeiro e operacional"],
@@ -1991,8 +1996,13 @@ function renderSkeleton() {
   `;
 }
 
+function campaignsPage(data) {
+  return adsManagerPanel(data?.adsManager);
+}
+
 const renderers = {
   dashboard: dashboardPage,
+  campaigns: campaignsPage,
   sales: salesPage,
   funnel: funnelPage,
   metrics: metricsPage,
@@ -2839,6 +2849,10 @@ async function bootstrap() {
 
 function iconDashboard() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5V20h6v-5.5H4Zm10 0V20h6v-8.5h-6ZM4 4v5.5h6V4H4Zm10 0v5.5h6V4h-6Z"/></svg>';
+}
+
+function iconCampaigns() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h3l5 4V6L7 10H4Zm12 2c0-1.6-.7-3-1.8-4l1.4-1.4A6.9 6.9 0 0 1 18 12a6.9 6.9 0 0 1-2.4 5.4l-1.4-1.4A4.8 4.8 0 0 0 16 12Zm-3-4.9 1.5-1.5A7.8 7.8 0 0 1 17.7 12a7.8 7.8 0 0 1-3.2 6.4l-1.5-1.5A5.9 5.9 0 0 0 15.2 12a5.9 5.9 0 0 0-2.2-4.9Z"/></svg>';
 }
 
 function iconSales() {
